@@ -1,0 +1,8 @@
+{
+  "name": "Mewar-Sync: Heritage Artisan Ecosystem",
+  "description": "A heritage-tech ecosystem for Udaipur’s artisans featuring AI-powered ledger management, authenticity scanning, and a royal-standard guest experience.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
