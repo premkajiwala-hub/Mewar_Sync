@@ -51,7 +51,11 @@ export class GeminiService {
   }
 
   private getAI() {
-    return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("Gemini API key is missing. Please set VITE_GEMINI_API_KEY in your environment.");
+    }
+    return new GoogleGenAI({ apiKey });
   }
 
   async parseLedgerVoice(transcript: string): Promise<VoiceAction> {

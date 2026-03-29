@@ -23,9 +23,6 @@ import { AIChatbot } from './components/Communication/AIChatbot';
 import { ProductDetail } from './components/Visitor/ProductDetail';
 import { AnalyticsDashboard } from './components/Admin/AnalyticsDashboard';
 import { LocationPhotoManager } from './components/Admin/LocationPhotoManager';
-import { Inquiries } from './components/Artisan/Inquiries';
-import { BoliToBahi } from './components/Artisan/BoliToBahi';
-import { LiveStoryFeed } from './components/Artisan/LiveStoryFeed';
 import { storage } from './services/storage';
 
 const App: React.FC = () => {
@@ -51,9 +48,6 @@ const App: React.FC = () => {
       'INVENTORY': 'Inventory',
       'UDHAAR': 'Udhaar Tracker',
       'REPORTS': 'Ledger Reports',
-      'INQUIRIES': 'Visitor Inquiries',
-      'BOLI_TO_BAHI': 'Boli to Bahi',
-      'LIVE_STORY': 'Live Story',
       'GALLERY': 'My Gallery',
       'SCANNER': 'Scan to List',
       'SETTINGS': 'Profile Settings',
@@ -69,9 +63,6 @@ const App: React.FC = () => {
       'INVENTORY': 'स्टॉक',
       'UDHAAR': 'उधार खाता',
       'REPORTS': 'बही रिपोर्ट',
-      'INQUIRIES': 'आगंतुक पूछताछ',
-      'BOLI_TO_BAHI': 'बोली से बही',
-      'LIVE_STORY': 'लाइव स्टोरी',
       'GALLERY': 'मेरी गैलरी',
       'SCANNER': 'स्कैन लिस्ट',
       'SETTINGS': 'प्रोफ़ाइल सेटिंग्स',
@@ -87,9 +78,6 @@ const App: React.FC = () => {
       'INVENTORY': 'माल-सामान',
       'UDHAAR': 'उधारो खातो',
       'REPORTS': 'बही री रिपोर्ट',
-      'INQUIRIES': 'आगंतुक पूछताछ',
-      'BOLI_TO_BAHI': 'बोली री बही',
-      'LIVE_STORY': 'लाइव स्टोरी',
       'GALLERY': 'मारी गैलरी',
       'SCANNER': 'स्कैन लिस्ट',
       'SETTINGS': 'प्रोफ़ाइल सेटिंग्स',
@@ -335,8 +323,6 @@ const App: React.FC = () => {
         { id: 'LEDGER', label: t('LEDGER'), icon: BookOpen },
         { id: 'INVENTORY', label: t('INVENTORY'), icon: Package },
         { id: 'UDHAAR', label: t('UDHAAR'), icon: History },
-        { id: 'INQUIRIES', label: t('INQUIRIES'), icon: Mail },
-        { id: 'BOLI_TO_BAHI', label: t('BOLI_TO_BAHI'), icon: Sparkles },
         { id: 'REPORTS', label: t('REPORTS'), icon: FileText },
         { id: 'SELL', label: t('SCANNER'), icon: Store },
         { id: 'SETTINGS', label: t('SETTINGS'), icon: User }
@@ -351,7 +337,6 @@ const App: React.FC = () => {
     } else {
       return [
         { id: 'HERITAGE_FEED', label: t('HERITAGE_FEED'), icon: Heart },
-        { id: 'LIVE_STORY', label: t('LIVE_STORY'), icon: Play },
         { id: 'ARTISAN_GALLERY', label: t('ARTISAN_GALLERY'), icon: ShoppingBag },
         { id: 'TRANSLATOR', label: t('TRANSLATOR'), icon: Languages },
         { id: 'VERIFY', label: t('SCAN_AUTHENTICITY'), icon: Landmark },
@@ -373,8 +358,6 @@ const App: React.FC = () => {
         case 'LEDGER': return <RoyalLedger key={refreshKey} onUpdate={() => setRefreshKey(k => k + 1)} onModalToggle={setIsAnyModalOpen} />;
         case 'INVENTORY': return <Inventory key={refreshKey} onUpdate={() => setRefreshKey(k => k + 1)} onModalToggle={setIsAnyModalOpen} />;
         case 'UDHAAR': return <UdhaarTracker key={refreshKey} onModalToggle={setIsAnyModalOpen} />;
-        case 'INQUIRIES': return <Inquiries />;
-        case 'BOLI_TO_BAHI': return <BoliToBahi onUpdate={() => setRefreshKey(k => k + 1)} />;
         case 'REPORTS': return <LedgerReports key={refreshKey} />;
         case 'SETTINGS': return <ProfileSettings onModalToggle={setIsAnyModalOpen} />;
         default: return <ArtisanDashboard key={refreshKey} />;
@@ -399,7 +382,6 @@ const App: React.FC = () => {
             onSelectProduct={setSelectedProduct}
           />
         );
-        case 'LIVE_STORY': return <LiveStoryFeed />;
         case 'ARTISAN_GALLERY': return (
           <ArtisanGallery 
             onOpenMessenger={(artisan) => {
