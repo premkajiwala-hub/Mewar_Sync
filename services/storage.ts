@@ -191,8 +191,8 @@ export interface SignUpInput {
 const EDITABLE_PROFILE_FIELDS = ['name', 'phone', 'category', 'shopAddress', 'description', 'preferredLanguage', 'location', 'profile_picture', 'thumbnail'] as const;
 type EditableProfile = Partial<Pick<UserProfile, (typeof EDITABLE_PROFILE_FIELDS)[number]>>;
 
-const CLOUDINARY_CLOUD = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'dv3iwgyca';
-const CLOUDINARY_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'place_photos';
+const CLOUDINARY_CLOUD = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || '';
+const CLOUDINARY_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || '';
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 /* ------------------------------------------------------------------ */
@@ -357,6 +357,7 @@ class FirebaseStorageService {
 
   /** Uploads an image to Cloudinary (image-only endpoint) and returns its https URL. */
   async uploadImage(file: Blob): Promise<string> {
+    if (!CLOUDINARY_CLOUD || !CLOUDINARY_PRESET) throw new UserFacingError('Photo uploads are not configured.');
     validateImageFile(file);
     if (file.size > MAX_UPLOAD_BYTES) throw new UserFacingError('Image must be smaller than 5 MB.');
     const form = new FormData();
