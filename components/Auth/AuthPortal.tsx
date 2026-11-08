@@ -1,277 +1,247 @@
-
-import React, { useState } from 'react';
-import { Store, Compass, ChevronRight, Mail, User, Phone, Landmark, UserPlus, LogIn, ArrowLeft, Lock, ShieldCheck, AlertCircle } from 'lucide-react';
-import { UserRole, UserProfile } from '../../types';
+import React, { Suspense, lazy, useState } from 'react';
+import { ArrowLeft, Compass, Eye, EyeOff, Store } from 'lucide-react';
 import { storage } from '../../services/storage';
+import { errorMessage } from '../../services/api';
+import { cx } from '../../lib/cx';
+import { Button } from '../ui/Button';
+import { Field, Input, Select, SegmentedControl } from '../ui/Form';
+import { ArchMotif, Wordmark } from '../ui/Ornaments';
+import { Spinner } from '../ui/Surface';
 
-import { LocationPicker } from '../UI/LocationPicker';
+const LocationPicker = lazy(() => import('../ui/LocationPicker').then(m => ({ default: m.LocationPicker })));
 
-interface AuthPortalProps {
-  onAuthSuccess: (user: UserProfile) => void;
+type Mode = 'signin' | 'signup' | 'reset';
+type Role = 'SHOPKEEPER' | 'VISITOR';
+
+export const CRAFT_CATEGORIES = ['Pichwai', 'Miniature painting', 'Phad painting', 'Koftgari', 'Meenakari', 'Block printing', 'Bandhani', 'Blue pottery', 'Terracotta', 'Wood carving', 'Stone carving', 'Silver jewellery', 'Lac work', 'Paintings', 'Other'];
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+function PasswordInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
+  const [show, setShow] = useState(false);
+  return (
+    <Input
+      {...props}
+      type={show ? 'text' : 'password'}
+      trailing={
+        <button type="button" onClick={() => setShow(s => !s)} className="flex size-9 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-black/5 hover:text-ink" aria-label={show ? 'Hide password' : 'Show password'} aria-pressed={show}>
+          {show ? <EyeOff aria-hidden className="size-4" /> : <Eye aria-hidden className="size-4" />}
+        </button>
+      }
+    />
+  );
 }
 
-export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthSuccess }) => {
-  const [step, setStep] = useState<'choice' | 'form' | 'location'>('choice');
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [role, setRole] = useState<UserRole | null>(null);
+export const AuthPortal: React.FC = () => {
+  const [mode, setMode] = useState<Mode>('signin');
+  const [role, setRole] = useState<Role>('SHOPKEEPER');
+  const [step, setStep] = useState<'details' | 'location'>('details');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [formData, setFormData] = useState({
-    name: '',
-    phone: '',
-    category: 'Paintings'
-  });
+  const [confirm, setConfirm] = useState('');
+  const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [category, setCategory] = useState(CRAFT_CATEGORIES[0]);
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [formError, setFormError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
 
-  const selectMode = (selectedRole: UserRole, signUpMode: boolean) => {
-    setRole(selectedRole);
-    setIsSignUp(signUpMode);
-    setStep('form');
-    setError('');
+  const switchMode = (m: Mode) => {
+    setMode(m);
+    setStep('details');
+    setErrors({});
+    setFormError('');
+    setNotice('');
   };
 
-  const validatePhone = (num: string) => {
-    return /^\d{10}$/.test(num);
+  const validateDetails = (): Record<string, string> => {
+    const e: Record<string, string> = {};
+    if (!EMAIL_RE.test(email.trim())) e.email = 'Enter a valid email address.';
+    if (mode === 'signin') {
+      if (!password) e.password = 'Enter your password.';
+      return e;
+    }
+    if (name.trim().length < 2) e.name = 'Enter your full name.';
+    if (!/^\d{10}$/.test(phone.trim())) e.phone = 'Enter a 10-digit mobile number (digits only).';
+    if (password.length < 8 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) e.password = 'Use at least 8 characters with letters and numbers.';
+    if (confirm !== password) e.confirm = 'Passwords do not match.';
+    return e;
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
+  const submit = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    if (busy) return;
+    setFormError('');
+    setNotice('');
 
+    if (mode === 'reset') {
+      if (!EMAIL_RE.test(email.trim())) {
+        setErrors({ email: 'Enter a valid email address.' });
+        return;
+      }
+      setErrors({});
+      setBusy(true);
+      try {
+        await storage.requestPasswordReset(email);
+        setNotice('If an account exists for this email, a password reset link is on its way.');
+      } catch (err) {
+        setFormError(errorMessage(err));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    const e = validateDetails();
+    setErrors(e);
+    if (Object.keys(e).length > 0) return;
+
+    if (mode === 'signup' && role === 'SHOPKEEPER' && step === 'details') {
+      setStep('location');
+      return;
+    }
+    if (mode === 'signup' && role === 'SHOPKEEPER' && !location) {
+      setFormError('Tap the map to pin your workshop.');
+      return;
+    }
+
+    setBusy(true);
     try {
-      if (isSignUp) {
-        if (!validatePhone(formData.phone)) {
-          throw new Error("Mewar-Sync requires a valid 10-digit phone number.");
-        }
-        if (password !== confirmPassword) {
-          throw new Error("Mewar-Sync security check: Passwords do not match.");
-        }
-        if (password.length < 6) {
-          throw new Error("Mewar-Sync security policy: Password must be at least 6 characters.");
-        }
-        if (isSignUp && role === 'SHOPKEEPER' && !location) {
-          setStep('location');
-          setLoading(false);
-          return;
-        }
-
-        const signUpData: any = {
-          ...formData,
+      if (mode === 'signin') {
+        await storage.signIn(email, password);
+      } else {
+        await storage.signUp({
           email,
           password,
-          role: role as UserRole,
-        };
-
-        if (location) {
-          signUpData.location = location;
-        }
-
-        const user = await storage.signUp(signUpData);
-        onAuthSuccess(user);
-      } else {
-        const user = await storage.signIn(email, password);
-        onAuthSuccess(user);
+          name,
+          phone: phone.trim(),
+          role,
+          category: role === 'SHOPKEEPER' ? category : undefined,
+          location: role === 'SHOPKEEPER' && location ? location : undefined,
+        });
       }
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+    } catch (err) {
+      setFormError(errorMessage(err, 'Could not complete the request. Please try again.'));
+      setBusy(false);
     }
   };
 
-  if (step === 'choice') {
-    return (
-      <div className="min-h-screen bg-[#F5F5F5] flex flex-col items-center justify-center p-6 font-outfit">
-        <div className="text-center mb-12 animate-in fade-in slide-in-from-top duration-700">
-           <Landmark className="mx-auto text-saffron mb-4 w-16 h-16" />
-           <h1 className="text-6xl font-heritage font-bold tracking-tighter text-gray-900 mb-2 uppercase">MEWAR<span className="text-gold">-SYNC</span></h1>
-           <p className="text-gray-400 uppercase tracking-[0.4em] text-[10px] font-bold">The Royal Gateway</p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl w-full animate-in zoom-in duration-500">
-          <div className="glass-mewar p-10 rounded-[40px] border-2 border-gold/10 flex flex-col items-center text-center group hover:border-gold/30 transition-all bg-white/40 shadow-xl">
-            <div className="w-16 h-16 bg-gold/10 rounded-full flex items-center justify-center text-gold mb-6 group-hover:scale-110 transition-transform">
-              <Compass size={32} />
-            </div>
-            <h2 className="text-2xl font-heritage font-bold mb-2 uppercase tracking-wide">Guest Gateway</h2>
-            <p className="text-gray-500 text-sm mb-8 leading-relaxed italic">Explore the legacy of Mewar</p>
-            <div className="w-full space-y-3 font-heritage">
-              <button 
-                onClick={() => selectMode('VISITOR', true)}
-                className="w-full py-4 bg-royal-gradient text-white rounded-2xl font-bold text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 shadow-lg hover:translate-y-[-2px] transition-all"
-              >
-                <UserPlus size={16} /> Join as Guest
-              </button>
-              <button 
-                onClick={() => selectMode('VISITOR', false)}
-                className="w-full py-4 bg-white border border-gold/20 rounded-2xl font-bold text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-gold/5 transition-all"
-              >
-                <LogIn size={16} /> Return to Mewar
-              </button>
-            </div>
-          </div>
-
-          <div className="glass-mewar p-10 rounded-[40px] border-2 border-saffron/10 flex flex-col items-center text-center group hover:border-saffron/30 transition-all bg-white/40 shadow-xl">
-            <div className="w-16 h-16 bg-saffron/10 rounded-full flex items-center justify-center text-saffron mb-6 group-hover:scale-110 transition-transform">
-              <Store size={32} />
-            </div>
-            <h2 className="text-2xl font-heritage font-bold mb-2 uppercase tracking-wide">Artisan Registry</h2>
-            <p className="text-gray-500 text-sm mb-8 leading-relaxed italic">Manage your heritage business</p>
-            <div className="w-full space-y-3 font-heritage">
-              <button 
-                onClick={() => selectMode('SHOPKEEPER', true)}
-                className="w-full py-4 bg-gray-900 text-white rounded-2xl font-bold text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 shadow-lg hover:translate-y-[-2px] transition-all"
-              >
-                <UserPlus size={16} /> Register Craft
-              </button>
-              <button 
-                onClick={() => selectMode('SHOPKEEPER', false)}
-                className="w-full py-4 bg-white border border-saffron/20 rounded-2xl font-bold text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-saffron/5 transition-all"
-              >
-                <LogIn size={16} /> Access Ledger
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (step === 'location') {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[#F5F5F5] p-6 font-outfit">
-        <div className="max-w-md w-full glass-mewar p-10 rounded-[40px] shadow-2xl border-2 border-gold/10 bg-white animate-in slide-in-from-bottom duration-500">
-          <button 
-            onClick={() => setStep('form')}
-            className="flex items-center gap-2 text-xs font-heritage font-bold text-gold uppercase tracking-widest mb-8 hover:text-saffron transition-colors"
-          >
-            <ArrowLeft size={14} /> Back to Details
-          </button>
-
-          <div className="text-center mb-8 font-heritage">
-            <h2 className="text-2xl font-bold">Set Workshop Location</h2>
-            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">Mandatory for Artisan Registry</p>
-          </div>
-
-          <LocationPicker 
-            onLocationSelect={(lat, lng) => setLocation({ lat, lng })}
-          />
-
-          <button 
-            onClick={handleSubmit}
-            disabled={loading || !location}
-            className="w-full mt-8 py-5 bg-gray-900 text-white rounded-2xl font-heritage font-bold flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95 disabled:opacity-50 uppercase tracking-widest text-xs"
-          >
-            {loading ? "REGISTERING..." : "FINISH REGISTRATION"}
-            {!loading && <ChevronRight size={18} />}
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const title = mode === 'signin' ? 'Sign in' : mode === 'reset' ? 'Reset password' : step === 'location' ? 'Workshop location' : 'Create account';
+  const wide = step === 'location';
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#F5F5F5] p-6 font-outfit">
-      <div className="max-w-md w-full glass-mewar p-10 rounded-[40px] shadow-2xl border-2 border-gold/10 relative overflow-hidden animate-in slide-in-from-bottom duration-500 bg-white">
-        <button 
-          onClick={() => setStep('choice')}
-          className="flex items-center gap-2 text-xs font-heritage font-bold text-gold uppercase tracking-widest mb-8 hover:text-saffron transition-colors"
-        >
-          <ArrowLeft size={14} /> Back to Gateway
-        </button>
-        
-        <div className="text-center mb-8 font-heritage">
-          <div className={`mx-auto w-12 h-12 rounded-full flex items-center justify-center mb-4 ${role === 'SHOPKEEPER' ? 'bg-saffron/10 text-saffron' : 'bg-gold/10 text-gold'}`}>
-             {role === 'SHOPKEEPER' ? <Store size={20} /> : <Compass size={20} />}
-          </div>
-          <h2 className="text-2xl font-bold">{isSignUp ? 'New Profile' : 'Welcome Back'}</h2>
-          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">{role} Portal</p>
+    <div className="relative flex min-h-dvh flex-col items-center justify-center overflow-hidden px-4 py-10">
+      {/* Understated Udaipur detail: a large, faint jharokha arch behind the card. */}
+      <ArchMotif className="pointer-events-none absolute left-1/2 top-1/2 h-[760px] w-[760px] -translate-x-1/2 -translate-y-1/2 text-gold/[0.13]" />
+
+      <div className={cx('relative w-full animate-rise-in', wide ? 'max-w-lg' : 'max-w-[400px]')}>
+        <div className="mb-7 flex justify-center">
+          <Wordmark />
         </div>
 
-        {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex flex-col gap-2 text-red-600 text-xs font-bold animate-in shake">
-            <div className="flex items-center gap-3">
-              <AlertCircle size={16} /> {error}
-            </div>
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-4 font-outfit">
-          <div className="relative">
-            <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-            <input 
-              required
-              type="email"
-              placeholder="Email Address"
-              className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-saffron shadow-sm"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+        <div className="ms-glass rounded-[22px] p-6 sm:p-8">
+          {mode !== 'reset' && step === 'details' && (
+            <SegmentedControl
+              label="Account action"
+              value={mode as 'signin' | 'signup'}
+              onChange={m => switchMode(m)}
+              options={[{ value: 'signin', label: 'Sign in' }, { value: 'signup', label: 'Create account' }]}
+              className="mb-6 w-full"
             />
-          </div>
-
-          <div className="relative">
-            <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-            <input 
-              required
-              type="password"
-              placeholder="Password"
-              className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-saffron shadow-sm"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-
-          {isSignUp && (
-            <>
-              <div className="relative">
-                <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                <input 
-                  required
-                  type="password"
-                  placeholder="Confirm Password"
-                  className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-saffron shadow-sm"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                />
-              </div>
-              <div className="relative">
-                <User className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                <input 
-                  required
-                  type="text"
-                  placeholder="Full Name"
-                  className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-saffron shadow-sm"
-                  value={formData.name}
-                  onChange={(e) => setFormData({...formData, name: e.target.value})}
-                />
-              </div>
-              <div className="relative">
-                <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                <input 
-                  required 
-                  type="tel" 
-                  placeholder="Phone (10 digits)" 
-                  className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-saffron shadow-sm" 
-                  value={formData.phone} 
-                  onChange={(e) => setFormData({...formData, phone: e.target.value})} 
-                />
-              </div>
-            </>
           )}
 
-          <button 
-            type="submit"
-            disabled={loading}
-            className={`w-full py-5 rounded-2xl font-heritage font-bold flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95 disabled:opacity-50 text-white uppercase tracking-widest text-xs ${role === 'SHOPKEEPER' ? 'bg-gray-900' : 'bg-royal-gradient shadow-saffron/20'}`}
-          >
-            {loading ? "AUTHENTICATING..." : isSignUp ? "REGISTER PROFILE" : "ENTER MEWAR"}
-            {!loading && <ChevronRight size={18} />}
-          </button>
-        </form>
+          {(mode === 'reset' || step === 'location') && (
+            <button type="button" onClick={() => (mode === 'reset' ? switchMode('signin') : setStep('details'))} className="-ml-1 mb-4 inline-flex items-center gap-1 rounded-lg px-1 py-0.5 text-sm font-medium text-indigo transition-colors hover:bg-indigo/5">
+              <ArrowLeft aria-hidden className="size-4" /> Back
+            </button>
+          )}
+
+          <h1 className="mb-5 text-[22px] font-semibold">{title}</h1>
+
+          <form onSubmit={submit} noValidate className="space-y-4">
+            {formError && <div role="alert" className="rounded-xl bg-danger-soft px-3.5 py-2.5 text-sm font-medium text-danger">{formError}</div>}
+            {notice && <div role="status" className="rounded-xl bg-success-soft px-3.5 py-2.5 text-sm font-medium text-success">{notice}</div>}
+
+            {mode === 'signup' && step === 'details' && (
+              <fieldset>
+                <legend className="sr-only">Account type</legend>
+                <div className="grid grid-cols-2 gap-2.5">
+                  {([
+                    { value: 'SHOPKEEPER', label: 'Artisan', icon: Store },
+                    { value: 'VISITOR', label: 'Visitor', icon: Compass },
+                  ] as const).map(opt => (
+                    <label
+                      key={opt.value}
+                      className={cx(
+                        'flex cursor-pointer items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-medium transition-[border-color,background-color,box-shadow] duration-200 has-[:focus-visible]:ring-4 has-[:focus-visible]:ring-indigo/15',
+                        role === opt.value ? 'border-indigo/50 bg-indigo/[0.06] text-indigo' : 'border-black/10 bg-white/60 text-ink-soft hover:border-black/20'
+                      )}
+                    >
+                      <input type="radio" name="role" value={opt.value} checked={role === opt.value} onChange={() => setRole(opt.value)} className="sr-only" />
+                      <opt.icon aria-hidden className="size-4" />
+                      {opt.label}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            )}
+
+            {step === 'details' && (
+              <>
+                {mode === 'signup' && (
+                  <Field label="Full name" required error={errors.name}>
+                    <Input autoComplete="name" value={name} onChange={e => setName(e.target.value)} maxLength={80} />
+                  </Field>
+                )}
+                <Field label="Email" required error={errors.email}>
+                  <Input type="email" autoComplete="email" inputMode="email" value={email} onChange={e => setEmail(e.target.value)} maxLength={254} />
+                </Field>
+                {mode !== 'reset' && (
+                  <Field label="Password" required error={errors.password} hint={mode === 'signup' ? '8+ characters, letters and numbers.' : undefined}>
+                    <PasswordInput autoComplete={mode === 'signin' ? 'current-password' : 'new-password'} value={password} onChange={e => setPassword(e.target.value)} maxLength={128} />
+                  </Field>
+                )}
+                {mode === 'signup' && (
+                  <>
+                    <Field label="Confirm password" required error={errors.confirm}>
+                      <PasswordInput autoComplete="new-password" value={confirm} onChange={e => setConfirm(e.target.value)} maxLength={128} />
+                    </Field>
+                    <Field label="Mobile number" required error={errors.phone}>
+                      <Input type="tel" autoComplete="tel-national" inputMode="numeric" placeholder="10 digits" value={phone} onChange={e => setPhone(e.target.value.replace(/[^\d]/g, '').slice(0, 10))} />
+                    </Field>
+                    {role === 'SHOPKEEPER' && (
+                      <Field label="Main craft">
+                        <Select value={category} onChange={e => setCategory(e.target.value)}>
+                          {CRAFT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                        </Select>
+                      </Field>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            {step === 'location' && (
+              <Suspense fallback={<div className="flex h-64 items-center justify-center"><Spinner label="Loading map" /></div>}>
+                <LocationPicker initialLocation={location ?? undefined} onLocationSelect={(lat, lng) => setLocation({ lat, lng })} />
+              </Suspense>
+            )}
+
+            <Button type="submit" fullWidth size="lg" loading={busy} className="mt-2">
+              {mode === 'signin' ? 'Sign in' : mode === 'reset' ? 'Send reset link' : role === 'SHOPKEEPER' && step === 'details' ? 'Continue' : 'Create account'}
+            </Button>
+
+            {mode === 'signin' && (
+              <p className="text-center">
+                <button type="button" onClick={() => switchMode('reset')} className="rounded-lg px-1 text-sm font-medium text-indigo transition-colors hover:text-indigo-deep hover:underline">
+                  Forgot password?
+                </button>
+              </p>
+            )}
+          </form>
+        </div>
       </div>
     </div>
   );

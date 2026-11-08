@@ -1,4 +1,4 @@
-import { MapLocation } from '../types';
+import type { MapLocation } from '../types';
 
 export const LOCATIONS: MapLocation[] = [
   // Heritage Sites

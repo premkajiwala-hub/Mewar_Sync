@@ -6,11 +6,25 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+firestore-debug.log
+firebase-debug.log
+ui-debug.log
 
 node_modules
 dist
 dist-ssr
 *.local
+
+# Environment files — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Test output
+test-results
+playwright-report
+coverage
+.emulator-tmp
 
 # Editor directories and files
 .vscode/*

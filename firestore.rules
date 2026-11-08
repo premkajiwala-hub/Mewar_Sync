@@ -1,0 +1,336 @@
+rules_version = '2';
+
+// Mewar Sync — Firestore security rules.
+//
+// The browser talks to Firestore directly, so these rules ARE the backend
+// authorization layer. Principles:
+//   * deny by default (no wildcard match);
+//   * every business record belongs to exactly one artisan (`shop_id`) and is
+//     readable/writable only by that artisan;
+//   * roles are chosen once at sign-up (SHOPKEEPER or VISITOR) and can never be
+//     changed by the client; ADMIN is granted out-of-band (console/Admin SDK);
+//   * writes are validated: field allow-lists, types, enums and bounds;
+//   * fields that encode trust (shop_id, role, is_verified, sender_id …) can
+//     never be set or changed by an unauthorised client.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function profilePath(id) { return /databases/$(database)/documents/profiles/$(id); }
+    function hasProfile() { return signedIn() && exists(profilePath(uid())); }
+    function myRole() { return get(profilePath(uid())).data.role; }
+    function isShopkeeper() { return hasProfile() && myRole() == 'SHOPKEEPER'; }
+    function isVisitor() { return hasProfile() && myRole() == 'VISITOR'; }
+    function isAdmin() { return hasProfile() && myRole() == 'ADMIN'; }
+
+    function isStr(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+    function optStr(d, key, max) { return !(key in d) || isStr(d[key], 0, max); }
+    function isNum(v, min, max) { return (v is int || v is float) && v >= min && v <= max; }
+    function isIso(v) { return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?Z$'); }
+    function isDateKey(v) { return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'); }
+    function isHttpsUrl(v) { return v is string && v.size() <= 2048 && v.matches('^https://[^ <>"\']+$'); }
+    function optUrl(d, key) { return !(key in d) || d[key] == '' || isHttpsUrl(d[key]); }
+    function legacyIdOk(d, docId) { return !('id' in d) || d.id == docId; }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+
+    // A user may only add or remove *their own* uid from a likes list.
+    function likesToggleOk(before, after) {
+      return after is list && (
+        (!(uid() in before) && after.size() == before.size() + 1 && after.toSet() == before.toSet().union([uid()].toSet()))
+        || ((uid() in before) && after.toSet() == before.toSet().difference([uid()].toSet()) && !(uid() in after))
+      );
+    }
+
+    // ---------- profiles ----------
+    match /profiles/{userId} {
+      function validProfile(d) {
+        return isStr(d.name, 1, 80)
+          && isStr(d.email, 3, 254)
+          && (!('phone' in d) || (d.phone is string && d.phone.matches('^[0-9]{10}$')))
+          && optStr(d, 'category', 60)
+          && optStr(d, 'shopAddress', 200)
+          && optStr(d, 'description', 1500)
+          && (!('preferredLanguage' in d) || d.preferredLanguage in ['English', 'Hindi', 'Marwadi', 'Marwari', 'Mewari'])
+          && optUrl(d, 'profile_picture')
+          && optUrl(d, 'thumbnail')
+          && (!('location' in d) || (d.location is map
+                && d.location.keys().hasOnly(['lat', 'lng'])
+                && isNum(d.location.lat, -90, 90) && isNum(d.location.lng, -180, 180)))
+          && (!('likes' in d) || d.likes is list);
+      }
+
+      // Artisan profiles are public to signed-in users (they are shop listings);
+      // visitor profiles are private to their owner.
+      allow get, list: if signedIn() && (uid() == userId || resource.data.role == 'SHOPKEEPER' || isAdmin());
+
+      allow create: if signedIn() && uid() == userId
+        && request.resource.data.keys().hasOnly(['id', 'name', 'email', 'phone', 'category', 'shopAddress', 'description', 'preferredLanguage', 'location', 'profile_picture', 'thumbnail', 'role'])
+        && request.resource.data.role in ['SHOPKEEPER', 'VISITOR']
+        && request.resource.data.email == request.auth.token.email
+        && legacyIdOk(request.resource.data, userId)
+        && validProfile(request.resource.data);
+
+      // Owner edits: role, email and likes are not editable by the owner.
+      allow update: if signedIn() && uid() == userId
+        && changed().hasOnly(['name', 'phone', 'category', 'shopAddress', 'description', 'preferredLanguage', 'location', 'profile_picture', 'thumbnail'])
+        && validProfile(request.resource.data);
+
+      // Other signed-in users may like/unlike an artisan.
+      allow update: if signedIn() && uid() != userId
+        && resource.data.role == 'SHOPKEEPER'
+        && changed().hasOnly(['likes'])
+        && likesToggleOk(resource.data.get('likes', []), request.resource.data.likes);
+
+      allow delete: if false;
+    }
+
+    // ---------- products (artisan gallery) ----------
+    match /products/{productId} {
+      function validProduct(d) {
+        return isStr(d.title, 1, 140)
+          && isStr(d.description, 0, 5000)
+          && isNum(d.price, 0, 1000000000)
+          && isStr(d.style, 0, 80)
+          && isHttpsUrl(d.image_url)
+          && d.is_verified is bool;
+      }
+
+      allow get, list: if signedIn();
+
+      allow create: if isShopkeeper()
+        && request.resource.data.keys().hasOnly(['title', 'description', 'price', 'style', 'image_url', 'shop_id', 'is_verified', 'reviews', 'likes'])
+        && request.resource.data.shop_id == uid()
+        && request.resource.data.is_verified == false
+        && request.resource.data.reviews == []
+        && (!('likes' in request.resource.data) || request.resource.data.likes == [])
+        && validProduct(request.resource.data);
+
+      allow update: if signedIn() && resource.data.shop_id == uid()
+        && changed().hasOnly(['title', 'description', 'price', 'style', 'image_url'])
+        && validProduct(request.resource.data);
+
+      // Verification is an administrative decision.
+      allow update: if isAdmin() && changed().hasOnly(['is_verified']) && request.resource.data.is_verified is bool;
+
+      allow update: if signedIn() && resource.data.shop_id != uid()
+        && changed().hasOnly(['likes'])
+        && likesToggleOk(resource.data.get('likes', []), request.resource.data.likes);
+
+      allow delete: if signedIn() && (resource.data.shop_id == uid() || isAdmin());
+    }
+
+    // ---------- inventory ----------
+    match /inventory/{itemId} {
+      function validInventory(d) {
+        return d.shop_id == uid()
+          && isStr(d.item, 1, 120)
+          && isNum(d.quantity, 0, 1000000)
+          && isNum(d.unit_cost, 0, 1000000000)
+          && d.is_purchased is bool
+          && isIso(d.last_updated)
+          && optStr(d, 'normalized_name', 120);
+      }
+      // `resource == null` lets a client check that a (random) id is still free.
+      allow get: if signedIn() && (resource == null || resource.data.shop_id == uid());
+      allow list: if signedIn() && resource.data.shop_id == uid();
+      allow create: if isShopkeeper()
+        && request.resource.data.keys().hasOnly(['shop_id', 'item', 'quantity', 'unit_cost', 'is_purchased', 'last_updated', 'normalized_name'])
+        && validInventory(request.resource.data);
+      allow update: if signedIn() && resource.data.shop_id == uid()
+        && changed().hasOnly(['item', 'quantity', 'unit_cost', 'is_purchased', 'last_updated', 'normalized_name'])
+        && validInventory(request.resource.data);
+      allow delete: if signedIn() && resource.data.shop_id == uid();
+    }
+
+    // ---------- ledger (paid) and udhaar (pending) entries ----------
+    function validEntry(d, status) {
+      return d.shop_id == uid()
+        && d.type in ['SALE', 'BUSINESS_EXPENSE', 'OTHER_EXPENSE', 'PERSONAL_RECEIVED', 'PERSONAL_PAID']
+        && d.category in ['BUSINESS', 'PERSONAL']
+        && (d.category == 'BUSINESS') == (d.type in ['SALE', 'BUSINESS_EXPENSE', 'OTHER_EXPENSE'])
+        && isStr(d.item, 1, 120)
+        && isNum(d.quantity, 1, 1000000)
+        && isNum(d.unit_price, 0, 1000000000)
+        && isNum(d.amount, 0, 1000000000)
+        && d.payment_status == status
+        && optStr(d, 'customer_name', 80)
+        && optStr(d, 'normalized_name', 120)
+        && optStr(d, 'inventory_id', 128)
+        && isIso(d.created_at)
+        && (!('updated_at' in d) || isIso(d.updated_at));
+    }
+    function entryKeys() {
+      return ['shop_id', 'type', 'category', 'item', 'quantity', 'unit_price', 'amount', 'payment_status',
+              'customer_name', 'created_at', 'normalized_name', 'inventory_id', 'updated_at'];
+    }
+    function editableEntryKeys() {
+      return ['category', 'item', 'quantity', 'unit_price', 'amount', 'customer_name', 'normalized_name', 'inventory_id', 'updated_at'];
+    }
+
+    match /ledger_entries/{entryId} {
+      // Idempotent writes read their own (random) id first; a missing doc reveals nothing.
+      allow get: if signedIn() && (resource == null || resource.data.shop_id == uid());
+      allow list: if signedIn() && resource.data.shop_id == uid();
+      allow create: if isShopkeeper()
+        && request.resource.data.keys().hasOnly(entryKeys())
+        && validEntry(request.resource.data, 'PAID');
+      allow update: if signedIn() && resource.data.shop_id == uid()
+        && changed().hasOnly(editableEntryKeys())
+        && validEntry(request.resource.data, 'PAID');
+      allow delete: if signedIn() && resource.data.shop_id == uid();
+    }
+
+    match /udhaar_entries/{entryId} {
+      // Idempotent writes read their own (random) id first; a missing doc reveals nothing.
+      allow get: if signedIn() && (resource == null || resource.data.shop_id == uid());
+      allow list: if signedIn() && resource.data.shop_id == uid();
+      allow create: if isShopkeeper()
+        && request.resource.data.keys().hasOnly(entryKeys())
+        && validEntry(request.resource.data, 'PENDING');
+      allow update: if signedIn() && resource.data.shop_id == uid()
+        && changed().hasOnly(editableEntryKeys())
+        && validEntry(request.resource.data, 'PENDING');
+      allow delete: if signedIn() && resource.data.shop_id == uid();
+    }
+
+    // ---------- daily closing summaries ----------
+    match /summaries/{summaryId} {
+      allow get: if signedIn() && (resource == null || resource.data.shop_id == uid());
+      allow list: if signedIn() && resource.data.shop_id == uid();
+      allow create, update: if isShopkeeper()
+        && request.resource.data.keys().hasOnly(['shop_id', 'date', 'total_sales', 'total_expenses', 'net_profit', 'closing_time'])
+        && request.resource.data.shop_id == uid()
+        && isDateKey(request.resource.data.date)
+        && summaryId == uid() + '_' + request.resource.data.date
+        && isNum(request.resource.data.total_sales, 0, 100000000000)
+        && isNum(request.resource.data.total_expenses, 0, 100000000000)
+        && isNum(request.resource.data.net_profit, -100000000000, 100000000000)
+        && isIso(request.resource.data.closing_time);
+      allow delete: if false;
+    }
+
+    // ---------- AI audit log (append-only, private) ----------
+    match /ai_logs/{logId} {
+      allow get, list: if signedIn() && resource.data.user_id == uid();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['user_id', 'interaction_type', 'input_context', 'output_result', 'timestamp'])
+        && request.resource.data.user_id == uid()
+        && request.resource.data.interaction_type in ['VOICE_LEDGER', 'SCANNER_PRODUCT']
+        && isStr(request.resource.data.input_context, 0, 600)
+        && request.resource.data.output_result is map
+        && isIso(request.resource.data.timestamp);
+      allow update, delete: if false;
+    }
+
+    // ---------- heritage-site photos (curated by admins) ----------
+    match /place_photos/{photoId} {
+      allow get, list: if signedIn();
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly(['place_id', 'image_url', 'uploaded_at', 'user_id'])
+        && request.resource.data.user_id == uid()
+        && isStr(request.resource.data.place_id, 1, 20)
+        && isHttpsUrl(request.resource.data.image_url)
+        && isIso(request.resource.data.uploaded_at);
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // ---------- artisan posts ----------
+    match /artisan_posts/{postId} {
+      allow get, list: if signedIn();
+      allow create: if isShopkeeper()
+        && request.resource.data.keys().hasOnly(['artisan_id', 'artisan_name', 'content', 'image_url', 'location', 'timestamp'])
+        && request.resource.data.artisan_id == uid()
+        && isStr(request.resource.data.artisan_name, 1, 80)
+        && isStr(request.resource.data.content, 1, 2000)
+        && optUrl(request.resource.data, 'image_url')
+        && request.resource.data.location is map
+        && isNum(request.resource.data.location.lat, -90, 90)
+        && isNum(request.resource.data.location.lng, -180, 180)
+        && isIso(request.resource.data.timestamp);
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.artisan_id == uid();
+    }
+
+    // ---------- contact messages (legacy inquiry form) ----------
+    match /contact_messages/{messageId} {
+      allow get, list: if signedIn() && resource.data.artisan_id == uid();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['artisan_id', 'visitor_name', 'visitor_email', 'message', 'timestamp', 'status'])
+        && isStr(request.resource.data.artisan_id, 1, 128)
+        && isStr(request.resource.data.visitor_name, 1, 80)
+        && isStr(request.resource.data.visitor_email, 3, 254)
+        && isStr(request.resource.data.message, 1, 2000)
+        && request.resource.data.status == 'NEW'
+        && isIso(request.resource.data.timestamp);
+      allow update: if signedIn() && resource.data.artisan_id == uid()
+        && changed().hasOnly(['status'])
+        && request.resource.data.status in ['NEW', 'READ', 'REPLIED', 'ARCHIVED'];
+      allow delete: if signedIn() && resource.data.artisan_id == uid();
+    }
+
+    // ---------- messenger ----------
+    function isParticipant(s) { return signedIn() && (s.artisan_id == uid() || s.visitor_id == uid()); }
+    function sessionData(sessionId) { return get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data; }
+
+    match /chat_sessions/{sessionId} {
+      allow get, list: if isParticipant(resource.data);
+
+      // Visitors start conversations with artisans; names must match profiles.
+      allow create: if isVisitor()
+        && request.resource.data.keys().hasOnly(['artisan_id', 'visitor_id', 'visitor_name', 'artisan_name', 'last_timestamp', 'unread_count_artisan', 'unread_count_visitor', 'product_id', 'last_message'])
+        && request.resource.data.visitor_id == uid()
+        && request.resource.data.artisan_id != uid()
+        && exists(profilePath(request.resource.data.artisan_id))
+        && get(profilePath(request.resource.data.artisan_id)).data.role == 'SHOPKEEPER'
+        && request.resource.data.artisan_name == get(profilePath(request.resource.data.artisan_id)).data.name
+        && request.resource.data.visitor_name == get(profilePath(uid())).data.name
+        && request.resource.data.unread_count_artisan == 0
+        && request.resource.data.unread_count_visitor == 0
+        && optStr(request.resource.data, 'product_id', 128)
+        && optStr(request.resource.data, 'last_message', 200)
+        && isIso(request.resource.data.last_timestamp);
+
+      allow update: if isParticipant(resource.data)
+        && changed().hasOnly(['last_message', 'last_timestamp', 'unread_count_artisan', 'unread_count_visitor', 'artisan_last_read', 'visitor_last_read'])
+        && isStr(request.resource.data.get('last_message', ''), 0, 200)
+        && isIso(request.resource.data.last_timestamp)
+        && request.resource.data.unread_count_artisan is int && request.resource.data.unread_count_artisan >= 0
+        && request.resource.data.unread_count_visitor is int && request.resource.data.unread_count_visitor >= 0
+        // each side may only mark its *own* side as read
+        && (!('artisan_last_read' in changed()) || resource.data.artisan_id == uid())
+        && (!('visitor_last_read' in changed()) || resource.data.visitor_id == uid())
+        && (!('artisan_last_read' in request.resource.data) || isIso(request.resource.data.artisan_last_read))
+        && (!('visitor_last_read' in request.resource.data) || isIso(request.resource.data.visitor_last_read));
+
+      allow delete: if isParticipant(resource.data);
+    }
+
+    match /chat_messages/{messageId} {
+      allow get, list: if signedIn() && isParticipant(sessionData(resource.data.session_id));
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['session_id', 'sender_id', 'text', 'timestamp', 'is_read', 'media_url', 'media_type', 'media_name'])
+        && request.resource.data.sender_id == uid()
+        && isStr(request.resource.data.session_id, 1, 128)
+        && isParticipant(sessionData(request.resource.data.session_id))
+        && isStr(request.resource.data.text, 0, 2000)
+        && (request.resource.data.text.size() > 0 || 'media_url' in request.resource.data)
+        && request.resource.data.is_read == false
+        && isIso(request.resource.data.timestamp)
+        && optUrl(request.resource.data, 'media_url')
+        && (!('media_type' in request.resource.data) || request.resource.data.media_type in ['IMAGE', 'FILE'])
+        && optStr(request.resource.data, 'media_name', 200);
+
+      allow update: if signedIn() && resource.data.sender_id == uid()
+        && changed().hasOnly(['text', 'is_edited'])
+        && isStr(request.resource.data.text, 1, 2000)
+        && request.resource.data.is_edited == true;
+
+      allow delete: if signedIn() && isParticipant(sessionData(resource.data.session_id));
+    }
+  }
+}

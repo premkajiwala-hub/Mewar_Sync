@@ -1,0 +1,301 @@
+@import "tailwindcss";
+
+/* Scan the app sources for class names (styles/ sits beside them). */
+@source "../components";
+@source "../App.tsx";
+@source "../index.tsx";
+
+/* ==========================================================================
+   Mewar Sync design tokens — light, quiet, corporate.
+   Neutral warm-grey canvas, white glass surfaces, royal indigo as the single
+   action colour and antique gold as a sparing cultural accent.
+   "-deep" variants are the text-safe (WCAG AA) versions of accent colours.
+   ========================================================================== */
+@theme {
+  --font-display: "Inter Variable", "Mukta", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-sans: "Inter Variable", "Mukta", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-brand: "Eczar Variable", "Eczar", Georgia, serif;
+
+  --color-ink: #1d1d1f;
+  --color-ink-soft: #3a3a3c;
+  --color-ink-muted: #6e6e73;
+  --color-ink-faint: #8e8e93;
+
+  --color-ivory: #f5f4f1;
+  --color-surface: #ffffff;
+  --color-parchment: #e7e5e0;
+  --color-parchment-soft: #f1f0ed;
+  --color-line: #dcd9d3;
+  --color-line-soft: #ebe9e5;
+
+  --color-indigo: #243b64;
+  --color-indigo-deep: #192b4a;
+  --color-indigo-night: #121f36;
+  --color-indigo-soft: #e9edf5;
+  --color-indigo-mist: #b9c3d6;
+
+  --color-maroon: #762f35;
+  --color-maroon-deep: #5e2429;
+  --color-maroon-soft: #f6e9e9;
+
+  --color-gold: #c49a52;
+  --color-gold-deep: #7a5c24;
+  --color-gold-soft: #f7f0e2;
+  --color-gold-light: #e2c78f;
+
+  --color-sage: #77856a;
+  --color-sage-deep: #4f5b45;
+  --color-sage-soft: #edf0e8;
+
+  --color-terracotta: #b86f4b;
+  --color-terracotta-deep: #8e4f31;
+  --color-terracotta-soft: #f7ece5;
+
+  --color-success: #2f6b3a;
+  --color-success-soft: #e6f1e4;
+  --color-warning: #8a5a00;
+  --color-warning-soft: #fcf2da;
+  --color-danger: #a02e2e;
+  --color-danger-soft: #fbe9e7;
+
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 22px;
+
+  --shadow-card: 0 0 0 1px rgb(0 0 0 / 0.04), 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px -14px rgb(0 0 0 / 0.12);
+  --shadow-raised: 0 0 0 1px rgb(0 0 0 / 0.04), 0 18px 36px -16px rgb(0 0 0 / 0.2);
+  --shadow-modal: 0 0 0 1px rgb(0 0 0 / 0.05), 0 30px 70px -24px rgb(0 0 0 / 0.32);
+
+  --animate-fade-in: fade-in 200ms ease-out both;
+  --animate-rise-in: rise-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  --animate-scale-in: scale-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes rise-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes scale-in {
+    from { opacity: 0; transform: scale(0.97); }
+    to { opacity: 1; transform: scale(1); }
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+
+  body {
+    @apply bg-ivory font-sans text-ink antialiased;
+    /* Soft light and a barely-there jaali lattice give the glass something
+       to diffuse; nothing here competes with content. */
+    background-image:
+      radial-gradient(900px 520px at 8% -10%, rgb(255 255 255 / 0.95), transparent 65%),
+      radial-gradient(900px 600px at 100% 0%, rgb(36 59 100 / 0.07), transparent 60%),
+      radial-gradient(800px 520px at 60% 110%, rgb(196 154 82 / 0.1), transparent 60%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='72' height='72'%3E%3Cpath d='M36 6l30 30-30 30L6 36z' fill='none' stroke='%23c49a52' stroke-opacity='.07' stroke-width='.7'/%3E%3Ccircle cx='36' cy='36' r='3.5' fill='none' stroke='%23c49a52' stroke-opacity='.07' stroke-width='.7'/%3E%3C/svg%3E");
+    background-attachment: fixed;
+  }
+
+  h1, h2, h3 {
+    @apply font-display text-ink;
+    letter-spacing: -0.022em;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-indigo);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  ::selection {
+    background: rgb(36 59 100 / 0.16);
+    color: var(--color-ink);
+  }
+
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+
+  [lang='hi'] body,
+  :lang(hi) {
+    line-height: 1.6;
+  }
+}
+
+@layer components {
+  /* ---------- Glass surfaces ----------
+     Opacity stays high enough that text contrast never depends on what is
+     behind the glass; see the fallbacks at the end of this file. */
+  .ms-glass {
+    background: rgb(255 255 255 / 0.74);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgb(255 255 255 / 0.75);
+    box-shadow: var(--shadow-card), inset 0 1px 0 rgb(255 255 255 / 0.9);
+  }
+  .ms-glass-strong {
+    background: rgb(255 255 255 / 0.88);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    backdrop-filter: blur(30px) saturate(180%);
+    border: 1px solid rgb(255 255 255 / 0.8);
+    box-shadow: var(--shadow-modal);
+  }
+  .ms-glass-bar {
+    background: rgb(255 255 255 / 0.7);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-bottom: 1px solid rgb(0 0 0 / 0.06);
+  }
+  .ms-glass-side {
+    background: rgb(255 255 255 / 0.58);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
+    border-right: 1px solid rgb(0 0 0 / 0.06);
+  }
+  .ms-glass-dark {
+    background: linear-gradient(160deg, #2a4472, #192b4a);
+    color: var(--color-ivory);
+  }
+  .ms-glass-field {
+    background: rgb(255 255 255 / 0.78);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+
+  /* Gentle elevation for interactive cards. */
+  .ms-lift {
+    transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 260ms ease, border-color 200ms ease;
+  }
+  .ms-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-raised), inset 0 1px 0 rgb(255 255 255 / 0.9);
+  }
+  .ms-lift:active {
+    transform: translateY(0) scale(0.995);
+  }
+
+  /* Fine gold hairline — the one recurring cultural line in the interface. */
+  .ms-hairline,
+  .ms-band {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgb(196 154 82 / 0.5) 20%, rgb(196 154 82 / 0.5) 80%, transparent);
+  }
+
+  /* Delicate lattice (jaali) for decorative surfaces only, never behind data. */
+  .ms-jaali {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Cpath d='M16 2l14 14-14 14L2 16z' fill='none' stroke='%23c49a52' stroke-opacity='.22' stroke-width='.7'/%3E%3Ccircle cx='16' cy='16' r='2' fill='none' stroke='%23c49a52' stroke-opacity='.22' stroke-width='.7'/%3E%3C/svg%3E");
+    background-size: 32px 32px;
+  }
+
+  .ms-num {
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+
+  .ms-scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(0 0 0 / 0.15) transparent;
+  }
+
+  .ms-no-scrollbar {
+    scrollbar-width: none;
+  }
+  .ms-no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Voice waveform bars */
+  .ms-wave span {
+    display: inline-block;
+    width: 4px;
+    border-radius: 9999px;
+    background: currentColor;
+    animation: ms-wave 900ms ease-in-out infinite;
+  }
+  .ms-wave span:nth-child(2) { animation-delay: -750ms; }
+  .ms-wave span:nth-child(3) { animation-delay: -600ms; }
+  .ms-wave span:nth-child(4) { animation-delay: -450ms; }
+  .ms-wave span:nth-child(5) { animation-delay: -300ms; }
+
+  @keyframes ms-wave {
+    0%, 100% { height: 6px; }
+    50% { height: 22px; }
+  }
+
+  /* Leaflet: keep map controls on-palette */
+  .leaflet-container {
+    font-family: var(--font-sans);
+    background: var(--color-parchment-soft);
+  }
+  .leaflet-bar a {
+    border-radius: 0 !important;
+  }
+  .leaflet-bar {
+    border-radius: 12px !important;
+    overflow: hidden;
+    border: 1px solid rgb(0 0 0 / 0.08) !important;
+    box-shadow: var(--shadow-card) !important;
+  }
+  .leaflet-popup-content-wrapper {
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-raised);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .ms-glass { background: rgb(255 255 255 / 0.97); }
+  .ms-glass-strong { background: #fff; }
+  .ms-glass-bar, .ms-glass-side { background: rgb(255 255 255 / 0.97); }
+  .ms-glass-field { background: #fff; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .ms-glass, .ms-glass-strong, .ms-glass-bar, .ms-glass-side {
+    background: var(--color-surface);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .ms-glass-field { background: #fff; backdrop-filter: none; }
+}
+
+/* Lighter blur on small screens keeps scrolling smooth on modest phones. */
+@media (max-width: 640px) {
+  .ms-glass { -webkit-backdrop-filter: blur(12px) saturate(160%); backdrop-filter: blur(12px) saturate(160%); }
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .ms-lift:hover {
+    transform: none;
+  }
+  .ms-wave span {
+    animation: none;
+    height: 14px;
+  }
+}

@@ -6,7 +6,6 @@ export interface UserProfile {
   role: UserRole;
   name: string;
   email: string;
-  password?: string;
   phone?: string;
   category?: string;
   shopAddress?: string;
@@ -38,6 +37,9 @@ export interface LedgerEntry {
   payment_status?: PaymentStatus;
   customer_name?: string;
   normalized_name?: string;
+  /** Stock item this entry moved, when it affected inventory. */
+  inventory_id?: string;
+  updated_at?: string;
 }
 
 export interface InventoryItem {
@@ -183,6 +185,9 @@ export interface ChatSession {
   unread_count_artisan: number;
   unread_count_visitor: number;
   product_id?: string;
+  /** ISO time each side last opened the conversation (drives read receipts). */
+  artisan_last_read?: string;
+  visitor_last_read?: string;
 }
 
 export interface VoiceAction {

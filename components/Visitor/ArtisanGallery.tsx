@@ -1,130 +1,112 @@
-
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Heart, Search, Users } from 'lucide-react';
+import type { ArtisanProduct, UserProfile } from '../../types';
 import { storage } from '../../services/storage';
-import { ArtisanProduct, UserProfile } from '../../types';
-import { Loader2, Heart, MessageSquare, Phone, User, Sparkles, Search, Filter, X, IndianRupee, Send } from 'lucide-react';
-import { JharokaFrame } from '../UI/JharokaFrame';
-import { ProductDetail } from './ProductDetail';
-import { ArtisanProfile } from './ArtisanProfile';
+import { errorMessage } from '../../services/api';
+import { useApp } from '../layout/AppContext';
+import { PageContainer } from '../layout/AppShell';
+import { Input } from '../ui/Form';
+import { Avatar, Badge, Card, EmptyState, ErrorState, LoadingBlock, PageHeader } from '../ui/Surface';
+import { ARCH_CLIP } from '../ui/Ornaments';
+import { safeImageUrl, stripMarkdownEmphasis } from '../../lib/text';
+import { cx } from '../../lib/cx';
+import { SafeImage } from '../ui/SafeImage';
 
-interface ArtisanGalleryProps {
-  onOpenMessenger?: (artisan: UserProfile) => void;
-}
-
-export const ArtisanGallery: React.FC<ArtisanGalleryProps> = ({ onOpenMessenger }) => {
-  const [products, setProducts] = useState<ArtisanProduct[]>([]);
+export const ArtisanGallery: React.FC = () => {
+  const { navigate } = useApp();
   const [artisans, setArtisans] = useState<UserProfile[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedProduct, setSelectedProduct] = useState<ArtisanProduct | null>(null);
-  const [selectedArtisan, setSelectedArtisan] = useState<UserProfile | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const user = storage.getCurrentUser();
+  const [products, setProducts] = useState<ArtisanProduct[]>([]);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [craft, setCraft] = useState('ALL');
 
-  useEffect(() => {
-    fetchData();
+  const load = useCallback(async () => {
+    try {
+      const [a, p] = await Promise.all([storage.getArtisans(), storage.getProducts()]);
+      setArtisans(a.sort((x, y) => x.name.localeCompare(y.name)));
+      setProducts(p);
+      setStatus('ready');
+    } catch (err) {
+      setError(errorMessage(err, 'Could not load artisans.'));
+      setStatus('error');
+    }
   }, []);
 
   useEffect(() => {
-    if (!loading && artisans.length > 0) {
-      const openId = sessionStorage.getItem('open_artisan_id');
-      if (openId) {
-        const artisan = artisans.find(a => a.id === openId);
-        if (artisan) {
-          setSelectedArtisan(artisan);
-        }
-        sessionStorage.removeItem('open_artisan_id');
-      }
-    }
-  }, [loading, artisans]);
+    void load();
+  }, [load]);
 
-  const fetchData = async () => {
-    setLoading(true);
-    const [productsData, artisansData] = await Promise.all([
-      storage.getProducts(),
-      storage.getProfiles()
-    ]);
-    setProducts(productsData);
-    setArtisans(artisansData.filter(p => p.role === 'SHOPKEEPER'));
-    setLoading(false);
-  };
+  const crafts = useMemo(() => [...new Set(artisans.map(a => a.category).filter(Boolean) as string[])].sort(), [artisans]);
+  const pieceCount = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of products) m.set(p.shop_id, (m.get(p.shop_id) ?? 0) + 1);
+    return m;
+  }, [products]);
 
-  const handleLike = async (productId: string) => {
-    if (!user) return;
-    await storage.likeProduct(productId, user.id);
-    // Optimistic update or refetch
-    setProducts(prev => prev.map(p => {
-      if (p.id === productId) {
-        const likes = p.likes || [];
-        const newLikes = likes.includes(user.id) ? likes.filter(id => id !== user.id) : [...likes, user.id];
-        return { ...p, likes: newLikes };
-      }
-      return p;
-    }));
-  };
-
-  const filteredArtisans = artisans.filter(a => 
-    a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    a.category?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  if (loading) {
-    return (
-      <div className="py-32 flex flex-col items-center justify-center">
-        <Loader2 className="animate-spin text-gold w-12 h-12 mb-4" />
-        <p className="text-[10px] font-bold text-gold uppercase tracking-widest">Opening the Royal Gallery...</p>
-      </div>
-    );
-  }
+  const visible = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return artisans.filter(a => (craft === 'ALL' || a.category === craft) && (!term || a.name.toLowerCase().includes(term) || (a.category || '').toLowerCase().includes(term)));
+  }, [artisans, search, craft]);
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-700 pb-20">
-      {/* Search and Filters */}
-      <div className="flex flex-col md:flex-row gap-6 items-center justify-between bg-white/50 backdrop-blur-md p-6 rounded-[32px] border border-gold/10 shadow-sm">
-        <div className="relative w-full">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gold/40" size={18} />
-          <input 
-            type="text"
-            placeholder="Search master artisans..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full bg-white border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:border-gold focus:outline-none transition-all"
-          />
-        </div>
-      </div>
+    <PageContainer wide>
+      <PageHeader title="Artisans" />
 
-      {/* Artisan Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
-        {filteredArtisans.map(artisan => (
-          <div 
-            key={artisan.id} 
-            onClick={() => setSelectedArtisan(artisan)}
-            className="glass-mewar p-6 rounded-[32px] group hover:shadow-2xl transition-all duration-500 border border-gold/10 bg-white/40 flex flex-col items-center text-center cursor-pointer"
-          >
-            <div className="w-24 h-24 rounded-full bg-royal-gradient flex items-center justify-center text-white text-3xl font-bold shadow-lg mb-4 group-hover:scale-110 transition-transform overflow-hidden border-2 border-white">
-              {artisan.profile_picture ? (
-                <img src={artisan.profile_picture} className="w-full h-full object-cover" alt={artisan.name} />
-              ) : (
-                artisan.name[0]
-              )}
-            </div>
-            <h3 className="font-heritage font-bold text-xl text-gray-900 mb-1">{artisan.name}</h3>
-            <p className="text-[10px] font-bold text-gold uppercase tracking-widest mb-4">{artisan.category || 'Master Artisan'}</p>
-            <p className="text-xs text-gray-500 italic mb-6 line-clamp-2">"{artisan.description || artisan.shopAddress || 'Traditional workshop in Udaipur'}"</p>
-            <button className="mt-auto w-full py-3 bg-white border border-gold/20 rounded-xl text-[10px] font-bold text-gold uppercase tracking-widest hover:bg-gold hover:text-white transition-all">
-              View Gallery
-            </button>
+      <Card className="mb-5 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <div className="lg:w-80">
+            <Input type="search" aria-label="Search artisans" placeholder="Search by name or craft" value={search} onChange={e => setSearch(e.target.value)} leading={<Search className="size-4" />} />
           </div>
-        ))}
-      </div>
+          <div role="group" aria-label="Filter by craft" className="ms-no-scrollbar -mx-1 flex gap-1.5 overflow-x-auto px-1">
+            {['ALL', ...crafts].map(c => (
+              <button key={c} type="button" aria-pressed={craft === c} onClick={() => setCraft(c)} className={cx('h-9 shrink-0 rounded-full px-3.5 text-sm font-medium transition-colors duration-200', craft === c ? 'bg-ink text-white' : 'bg-black/[0.05] text-ink-soft hover:bg-black/[0.08]')}>
+                {c === 'ALL' ? 'All crafts' : c}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
 
-      {/* Artisan Profile View */}
-      {selectedArtisan && (
-        <ArtisanProfile 
-          artisan={selectedArtisan} 
-          onOpenMessenger={onOpenMessenger}
-          onClose={() => setSelectedArtisan(null)} 
-        />
+      {status === 'loading' && <Card><LoadingBlock label="Loading artisans" rows={4} /></Card>}
+      {status === 'error' && <Card><ErrorState message={error} onRetry={load} /></Card>}
+      {status === 'ready' && visible.length === 0 && (
+        <Card><EmptyState icon={Users} title={artisans.length === 0 ? 'No artisans have joined yet' : 'No artisans match'} description={artisans.length === 0 ? 'Check back soon.' : 'Try another name or craft.'} /></Card>
       )}
-    </div>
+
+      {status === 'ready' && visible.length > 0 && (
+        <ul className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {visible.map(a => {
+            const cover = safeImageUrl(a.thumbnail);
+            const pieces = pieceCount.get(a.id) ?? 0;
+            return (
+              <li key={a.id}>
+                <Card as="article" interactive className="group relative flex h-full flex-col overflow-hidden">
+                  <div className="relative h-36 bg-parchment-soft" style={{ clipPath: ARCH_CLIP }}>
+                    <SafeImage src={cover} alt="" className="size-full transition-transform duration-500 group-hover:scale-105" />
+                  </div>
+                  <div className="relative z-10 -mt-8 flex flex-1 flex-col px-4 pb-4">
+                    <Avatar name={a.name} src={a.profile_picture} size={60} className="ring-4 ring-surface" />
+                    <h2 className="mt-2 text-lg font-semibold leading-snug">
+                      <a href={`#/artisans/${a.id}`} onClick={e => { e.preventDefault(); navigate(`/artisans/${a.id}`); }} className="after:absolute after:inset-0 focus-visible:outline-none">
+                        {a.name}
+                      </a>
+                    </h2>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {a.category && <Badge tone="gold">{a.category}</Badge>}
+                    </div>
+                    <p className="mt-2 line-clamp-2 text-sm text-ink-muted">{stripMarkdownEmphasis(a.description || a.shopAddress || 'Traditional workshop in Udaipur.')}</p>
+                    <div className="mt-auto flex items-center justify-between pt-3 text-sm text-ink-muted">
+                      <span>{pieces} {pieces === 1 ? 'piece' : 'pieces'}</span>
+                      <span className="inline-flex items-center gap-1"><Heart aria-hidden className="size-4" />{a.likes?.length ?? 0}<span className="sr-only"> likes</span></span>
+                    </div>
+                  </div>
+                </Card>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </PageContainer>
   );
 };

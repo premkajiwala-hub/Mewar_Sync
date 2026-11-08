@@ -1,166 +1,206 @@
-
-import React, { useEffect, useState } from 'react';
-import { IndianRupee, User, Calendar, CheckCircle, Clock, Search, Filter, AlertCircle } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ArrowDownLeft, ArrowUpRight, CalendarDays, CheckCircle2, HandCoins, Pencil, Search, Trash2 } from 'lucide-react';
+import type { LedgerEntry } from '../../types';
 import { storage } from '../../services/storage';
-import { LedgerEntry } from '../../types';
-import { ConfirmationModal } from '../UI/ConfirmationModal';
+import { errorMessage } from '../../services/api';
+import { useApp } from '../layout/AppContext';
+import { PageContainer } from '../layout/AppShell';
+import { Button, IconButton } from '../ui/Button';
+import { Checkbox, Input, SegmentedControl } from '../ui/Form';
+import { ConfirmDialog } from '../ui/Modal';
+import { Badge, Card, EmptyState, ErrorState, LoadingBlock, PageHeader } from '../ui/Surface';
+import { useToast } from '../ui/Toast';
+import { LedgerEntryForm } from './LedgerEntryForm';
+import { ENTRY_TYPE_LABELS, duesDirection, stockEffect, summarizeDues } from '../../lib/ledger';
+import { formatDate } from '../../lib/dates';
+import { formatINR } from '../../lib/money';
+import { cx } from '../../lib/cx';
 
-export const UdhaarTracker: React.FC<{ onModalToggle?: (isOpen: boolean) => void }> = ({ onModalToggle }) => {
+type Tab = 'RECEIVABLE' | 'PAYABLE';
+
+function daysSince(iso: string): number {
+  return Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 86_400_000));
+}
+
+export const UdhaarTracker: React.FC = () => {
+  const { dataVersion, notifyDataChanged } = useApp();
+  const toast = useToast();
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [modalConfig, setModalConfig] = useState<{ isOpen: boolean; entryId: string | null }>({
-    isOpen: false,
-    entryId: null
-  });
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [error, setError] = useState('');
+  const [tab, setTab] = useState<Tab>('RECEIVABLE');
+  const [search, setSearch] = useState('');
+  const [settling, setSettling] = useState<LedgerEntry | null>(null);
+  const [editing, setEditing] = useState<LedgerEntry | null>(null);
+  const [deleting, setDeleting] = useState<LedgerEntry | null>(null);
+  const [revertStock, setRevertStock] = useState(true);
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    onModalToggle?.(modalConfig.isOpen);
-  }, [modalConfig.isOpen, onModalToggle]);
-
-  useEffect(() => {
-    fetchUdhaar();
+  const load = useCallback(async () => {
+    try {
+      setEntries(await storage.getUdhaarEntries());
+      setStatus('ready');
+    } catch (err) {
+      setError(errorMessage(err, 'Could not load udhaar.'));
+      setStatus('error');
+    }
   }, []);
 
-  const fetchUdhaar = async () => {
-    setLoading(true);
-    const data = await storage.getUdhaarEntries();
-    setEntries(data);
-    setLoading(false);
-  };
+  useEffect(() => {
+    void load();
+  }, [load, dataVersion]);
 
-  const handleMarkAsPaid = async (id: string) => {
-    const entry = entries.find(e => e.id === id);
-    if (!entry || isSubmitting) return;
-    setIsSubmitting(true);
+  const dues = useMemo(() => summarizeDues(entries), [entries]);
+  const visible = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return entries.filter(e => duesDirection(e.type) === tab && (!term || (e.customer_name || '').toLowerCase().includes(term) || e.item.toLowerCase().includes(term)));
+  }, [entries, tab, search]);
 
-    // Optimistic Update
-    setEntries(prev => prev.filter(e => e.id !== id));
-    setModalConfig({ isOpen: false, entryId: null });
-
+  const settle = async () => {
+    if (!settling) return;
+    setBusy(true);
     try {
-      // 1. Create a NEW entry in the ledger collection
-      await storage.saveLedger({
-        type: entry.type || 'SALE',
-        category: entry.category || 'BUSINESS',
-        item: entry.item,
-        quantity: entry.quantity,
-        unit_price: entry.unit_price,
-        amount: entry.amount,
-        payment_status: 'PAID',
-        customer_name: entry.customer_name
-      });
-
-      // 2. Delete the document from the udhaar collection
-      await storage.deleteUdhaarEntry(id);
-      await fetchUdhaar();
-    } catch (error) {
-      console.error("Failed to settle udhaar:", error);
-      // Rollback
-      await fetchUdhaar();
+      await storage.settleUdhaar(settling.id);
+      toast.success('Marked as settled', `${formatINR(settling.amount)} moved into today’s ledger.`);
+      setSettling(null);
+      notifyDataChanged();
+    } catch (err) {
+      toast.error('Could not settle', errorMessage(err));
     } finally {
-      setIsSubmitting(false);
+      setBusy(false);
     }
   };
 
-  const filteredEntries = entries.filter(e => 
-    (e.customer_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (e.item || '').toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  const totalDues = entries.reduce((sum, e) => sum + e.amount, 0);
+  const remove = async () => {
+    if (!deleting) return;
+    setBusy(true);
+    try {
+      await storage.deleteLedgerEntry('udhaar_entries', deleting.id, { revertStock: stockEffect(deleting) !== 0 && revertStock });
+      toast.success('Udhaar entry deleted');
+      setDeleting(null);
+      notifyDataChanged();
+    } catch (err) {
+      toast.error('Could not delete', errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-700">
-      <div className="bg-white p-8 rounded-[40px] border border-gold/10 shadow-sm flex flex-col md:flex-row justify-between items-center gap-6">
-        <div>
-          <h2 className="text-3xl font-heritage font-bold text-gray-900">Udhaar Khata</h2>
-          <p className="text-xs text-gray-400 font-bold uppercase tracking-widest mt-1">Track pending payments from customers</p>
-        </div>
-        <div className="bg-red-50 px-8 py-4 rounded-3xl border border-red-100 flex items-center gap-4">
-          <div className="p-3 bg-red-500 rounded-2xl text-white">
-            <AlertCircle size={24} />
-          </div>
-          <div>
-            <p className="text-[10px] text-red-400 font-bold uppercase tracking-widest">Total Outstanding</p>
-            <p className="text-2xl font-heritage font-bold text-red-600">₹{totalDues.toLocaleString()}</p>
-          </div>
-        </div>
+    <PageContainer wide>
+      <PageHeader title="Udhaar" />
+
+      <div className="mb-5 grid gap-3 sm:grid-cols-2">
+        <Card as="div" className={cx('relative overflow-hidden p-5', tab === 'RECEIVABLE' && 'ring-1 ring-success/30')}>
+          <p className="flex items-center gap-1.5 text-sm font-medium text-ink-muted"><ArrowDownLeft aria-hidden className="size-4 text-success" /> To collect</p>
+          <p className="ms-num mt-1 font-display text-4xl font-semibold text-success">{formatINR(dues.receivable)}</p>
+          <p className="mt-1 text-sm text-ink-muted">{dues.receivableCount} open {dues.receivableCount === 1 ? 'entry' : 'entries'} — customers and people who owe you</p>
+        </Card>
+        <Card as="div" className={cx('relative overflow-hidden p-5', tab === 'PAYABLE' && 'ring-1 ring-maroon/30')}>
+          <p className="flex items-center gap-1.5 text-sm font-medium text-ink-muted"><ArrowUpRight aria-hidden className="size-4 text-maroon" /> To pay</p>
+          <p className="ms-num mt-1 font-display text-4xl font-semibold text-maroon">{formatINR(dues.payable)}</p>
+          <p className="mt-1 text-sm text-ink-muted">{dues.payableCount} open {dues.payableCount === 1 ? 'entry' : 'entries'} — suppliers and people you owe</p>
+        </Card>
       </div>
 
-      <div className="bg-white p-6 rounded-[32px] border border-gold/10 shadow-sm flex items-center gap-4">
-        <Search size={20} className="text-gray-400" />
-        <input 
-          type="text" 
-          placeholder="Search by customer name or item..."
-          value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-          className="flex-1 bg-transparent border-none focus:outline-none text-sm font-medium"
-        />
-        <Filter size={20} className="text-gray-400" />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {loading ? (
-          Array(6).fill(0).map((_, i) => (
-            <div key={i} className="h-48 bg-gray-100 rounded-[32px] animate-pulse" />
-          ))
-        ) : filteredEntries.length > 0 ? (
-          filteredEntries.map(entry => (
-            <div key={entry.id} className="bg-white p-8 rounded-[32px] border border-gold/10 shadow-sm hover:shadow-md transition-all group">
-              <div className="flex justify-between items-start mb-6">
-                <div className="p-4 bg-gray-50 rounded-2xl text-gray-400 group-hover:bg-gold/10 group-hover:text-gold transition-colors">
-                  <User size={24} />
-                </div>
-                <div className="text-right">
-                  <p className="text-2xl font-heritage font-bold text-gray-900">₹{entry.amount.toLocaleString()}</p>
-                  <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Outstanding</p>
-                </div>
-              </div>
-
-              <div className="space-y-3 mb-8">
-                <h4 className="font-bold text-gray-900 text-lg">{entry.customer_name || 'Anonymous Customer'}</h4>
-                <div className="flex items-center gap-2 text-xs text-gray-500 font-medium">
-                  <Clock size={14} className="text-saffron" />
-                  <span>{entry.item} ({entry.quantity} units)</span>
-                </div>
-                <div className="flex items-center gap-2 text-[10px] text-gray-400 font-bold uppercase tracking-widest">
-                  <Calendar size={12} />
-                  <span>{new Date(entry.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
-                </div>
-              </div>
-
-              <button 
-                onClick={() => setModalConfig({ isOpen: true, entryId: entry.id })}
-                className="w-full py-4 bg-green-50 text-green-600 rounded-2xl font-bold text-xs uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-green-600 hover:text-white transition-all"
-              >
-                <CheckCircle size={16} />
-                Mark as Paid
-              </button>
-            </div>
-          ))
-        ) : (
-          <div className="col-span-full py-20 text-center">
-            <div className="w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-6 text-gray-300">
-              <IndianRupee size={40} />
-            </div>
-            <h3 className="text-xl font-heritage font-bold text-gray-900">No Pending Dues</h3>
-            <p className="text-gray-400 text-sm mt-2">All your royal accounts are settled, Hukumn.</p>
+      <Card>
+        <div className="flex flex-col gap-3 border-b border-line-soft p-4 sm:flex-row sm:items-center sm:justify-between">
+          <SegmentedControl label="Direction" value={tab} onChange={setTab} options={[{ value: 'RECEIVABLE', label: `To collect (${dues.receivableCount})` }, { value: 'PAYABLE', label: `To pay (${dues.payableCount})` }]} />
+          <div className="sm:w-72">
+            <Input type="search" aria-label="Search udhaar" placeholder="Search name or item" value={search} onChange={e => setSearch(e.target.value)} leading={<Search className="size-4" />} />
           </div>
+        </div>
+
+        {status === 'loading' && <LoadingBlock label="Loading udhaar" />}
+        {status === 'error' && <ErrorState message={error} onRetry={load} />}
+        {status === 'ready' && visible.length === 0 && (
+          <EmptyState
+            icon={HandCoins}
+            title={entries.length === 0 ? 'No open udhaar' : search ? 'No entries match' : tab === 'RECEIVABLE' ? 'Nobody owes you right now' : 'You owe nothing right now'}
+            
+          />
         )}
-      </div>
 
-      <ConfirmationModal 
-        isOpen={modalConfig.isOpen}
-        title="Settle Account"
-        message="Has the customer paid the full amount for this entry?"
-        type="confirm"
-        confirmLabel="Yes, Paid"
-        isLoading={isSubmitting}
-        onConfirm={() => modalConfig.entryId && handleMarkAsPaid(modalConfig.entryId)}
-        onCancel={() => setModalConfig({ isOpen: false, entryId: null })}
+        {status === 'ready' && visible.length > 0 && (
+          <ul className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3">
+            {visible.map(e => {
+              const age = daysSince(e.created_at);
+              return (
+                <li key={e.id}>
+                  <Card as="article" interactive className="flex h-full flex-col p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="truncate font-sans text-base font-semibold">{e.customer_name || e.item}</h3>
+                        <p className="truncate text-sm text-ink-muted">
+                          {e.customer_name ? e.item : ENTRY_TYPE_LABELS[e.type]}
+                          {e.category === 'BUSINESS' && e.quantity > 1 && <span className="ms-num"> · {e.quantity} pcs</span>}
+                        </p>
+                      </div>
+                      <p className={cx('ms-num shrink-0 font-display text-xl font-semibold', tab === 'RECEIVABLE' ? 'text-success' : 'text-maroon')}>{formatINR(e.amount)}</p>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
+                      <Badge tone="neutral">{ENTRY_TYPE_LABELS[e.type]}</Badge>
+                      <span className="inline-flex items-center gap-1"><CalendarDays aria-hidden className="size-3.5" /> {formatDate(e.created_at)}</span>
+                      {age >= 30 && <Badge tone="warning">{age} days old</Badge>}
+                    </div>
+                    <div className="mt-4 flex items-center gap-1 border-t border-line-soft pt-3">
+                      <Button size="sm" variant={tab === 'RECEIVABLE' ? 'primary' : 'accent'} icon={CheckCircle2} onClick={() => setSettling(e)} className="flex-1">
+                        {tab === 'RECEIVABLE' ? 'Mark received' : 'Mark paid'}
+                      </Button>
+                      <IconButton icon={Pencil} size="sm" label={`Edit ${e.customer_name || e.item}`} onClick={() => setEditing(e)} />
+                      <IconButton icon={Trash2} size="sm" tone="danger" label={`Delete ${e.customer_name || e.item}`} onClick={() => { setRevertStock(true); setDeleting(e); }} />
+                    </div>
+                  </Card>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </Card>
+
+      <ConfirmDialog
+        open={!!settling}
+        title={tab === 'RECEIVABLE' ? 'Payment received?' : 'Payment made?'}
+        confirmLabel={tab === 'RECEIVABLE' ? 'Yes, received in full' : 'Yes, paid in full'}
+        loading={busy}
+        onCancel={() => setSettling(null)}
+        onConfirm={settle}
+        message={settling && (
+          <>
+            <strong className="text-ink">{formatINR(settling.amount)}</strong> {tab === 'RECEIVABLE' ? 'from' : 'to'} <strong className="text-ink">{settling.customer_name || settling.item}</strong> for “{settling.item}”.
+            It will be recorded in today’s ledger as paid. Stock is not changed again.
+          </>
+        )}
       />
-    </div>
+
+      <ConfirmDialog
+        open={!!deleting}
+        tone="danger"
+        title="Delete this udhaar entry?"
+        confirmLabel="Delete"
+        loading={busy}
+        onCancel={() => setDeleting(null)}
+        onConfirm={remove}
+        message={deleting && <>“{deleting.item}” — {formatINR(deleting.amount)}{deleting.customer_name ? ` (${deleting.customer_name})` : ''}. Use this only for mistakes; to record payment, mark it as settled instead.</>}
+      >
+        {deleting && stockEffect(deleting) !== 0 && (
+          <Checkbox checked={revertStock} onChange={setRevertStock} label={deleting.type === 'SALE' ? `Put ${deleting.quantity} back into stock` : `Remove ${deleting.quantity} from stock`} />
+        )}
+      </ConfirmDialog>
+
+      {editing && (
+        <LedgerEntryForm
+          open
+          entry={editing}
+          entryCollection="udhaar_entries"
+          onClose={() => setEditing(null)}
+          onSaved={msg => {
+            setEditing(null);
+            toast.success(msg);
+            notifyDataChanged();
+          }}
+        />
+      )}
+    </PageContainer>
   );
 };

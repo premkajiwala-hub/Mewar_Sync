@@ -1,331 +1,186 @@
-
-import React, { useState, useRef, useEffect } from 'react';
-import { Mic, Languages, Loader2, User, Store, Check, Info, ArrowRightLeft, Settings2, Volume2 } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { ArrowLeftRight, Languages, Mic, Square, Volume2 } from 'lucide-react';
 import { geminiService } from '../../services/gemini';
-import { LANGUAGES as GLOBAL_LANGUAGES } from '../../services/translations';
-import { storage } from '../../services/storage';
+import { errorMessage } from '../../services/api';
+import { useApp } from '../layout/AppContext';
+import { PageContainer } from '../layout/AppShell';
+import { Button, IconButton } from '../ui/Button';
+import { Field, Select, Textarea } from '../ui/Form';
+import { Card, PageHeader, Spinner } from '../ui/Surface';
+import { cx } from '../../lib/cx';
 
-const TRANSLATION_LANGS = GLOBAL_LANGUAGES.map(l => l.name);
+const LANGUAGES = [
+  { value: 'English', speech: 'en-IN' },
+  { value: 'Hindi', speech: 'hi-IN' },
+  { value: 'Marwari', speech: 'hi-IN' },
+  { value: 'Mewari', speech: 'hi-IN' },
+] as const;
+type Lang = (typeof LANGUAGES)[number]['value'];
+
+interface Recognition {
+  lang: string;
+  interimResults: boolean;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((e: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
+  onerror: ((e: { error: string }) => void) | null;
+  onend: (() => void) | null;
+}
+
+function recognitionCtor(): (new () => Recognition) | null {
+  const w = window as unknown as { SpeechRecognition?: new () => Recognition; webkitSpeechRecognition?: new () => Recognition };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
 
 export const TranslatorBridge: React.FC = () => {
-  const [isRecording, setIsRecording] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [translation, setTranslation] = useState('');
+  const { user } = useApp();
+  const [from, setFrom] = useState<Lang>('English');
+  const [to, setTo] = useState<Lang>('Hindi');
+  const [text, setText] = useState('');
+  const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  
-  const [inputLang, setInputLang] = useState('English');
-  const [targetLang, setTargetLang] = useState('Hindi');
-  const [showInputPicker, setShowInputPicker] = useState(false);
-  const [showTargetPicker, setShowTargetPicker] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [error, setError] = useState('');
+  const recRef = useRef<Recognition | null>(null);
+  const requestRef = useRef(0);
+  const canListen = !!recognitionCtor();
+  const canSpeak = typeof window !== 'undefined' && 'speechSynthesis' in window;
 
-  const lastTranslatedRef = useRef({ text: '', lang: '' });
+  useEffect(() => () => {
+    recRef.current?.abort();
+    if (canSpeak) window.speechSynthesis.cancel();
+  }, [canSpeak]);
 
-  const user = storage.getCurrentUser();
-  const recognitionRef = useRef<any>(null);
-
-  useEffect(() => {
-    if (user?.role === 'SHOPKEEPER') {
-      setInputLang(user.preferredLanguage || 'Hindi');
-      setTargetLang('English');
-    } else {
-      setInputLang('English');
-      setTargetLang(user?.preferredLanguage || 'Hindi');
-    }
-    return () => {
-      window.speechSynthesis.cancel();
-    };
-  }, [user]);
-
-  useEffect(() => {
-    const reTranslate = async () => {
-      if (!transcript || isRecording) return;
-      
-      // Avoid redundant translations
-      if (transcript === lastTranslatedRef.current.text && targetLang === lastTranslatedRef.current.lang) return;
-
-      setLoading(true);
-      try {
-        const translated = await geminiService.translateMessage(transcript, targetLang);
-        setTranslation(translated);
-        lastTranslatedRef.current = { text: transcript, lang: targetLang };
-        // We don't set loading false here, speakTranslation will handle it onstart
-        speakTranslation(translated, targetLang);
-      } catch (e) {
-        setLoading(false);
-        setTranslation("Translation error");
-      }
-    };
-    reTranslate();
-  }, [transcript, targetLang, isRecording]);
-
-  const swapLanguages = () => {
-    const temp = inputLang;
-    setInputLang(targetLang);
-    setTargetLang(temp);
-    setTranscript('');
-    setTranslation('');
-    lastTranslatedRef.current = { text: '', lang: '' };
-  };
-
-  const speakTranslation = (text: string, lang: string = 'Hindi') => {
-    if (!text || text === "Translation error") {
-      setLoading(false);
+  const translate = async (input = text) => {
+    const q = input.trim();
+    if (!q) return;
+    if (from === to) {
+      setResult(q);
       return;
     }
-    
-    // Stop Duplication: Cancel any ongoing speech before starting new one
+    const id = ++requestRef.current;
+    setLoading(true);
+    setError('');
+    try {
+      const out = await geminiService.translateMessage(q, to);
+      if (id === requestRef.current) setResult(out);
+    } catch (err) {
+      if (id === requestRef.current) setError(errorMessage(err, 'Translation failed. Please try again.'));
+    } finally {
+      if (id === requestRef.current) setLoading(false);
+    }
+  };
+
+  const listen = () => {
+    const Ctor = recognitionCtor();
+    if (!Ctor) return;
+    if (listening) {
+      recRef.current?.stop();
+      return;
+    }
+    setError('');
+    const rec = new Ctor();
+    rec.lang = LANGUAGES.find(l => l.value === from)?.speech ?? 'en-IN';
+    rec.interimResults = false;
+    rec.onresult = e => {
+      const heard = e.results[0]?.[0]?.transcript ?? '';
+      setText(heard.slice(0, 1000));
+      void translate(heard);
+    };
+    rec.onerror = e => {
+      if (e.error !== 'aborted') setError(e.error === 'not-allowed' ? 'Microphone access is blocked. Allow it in site settings, or type instead.' : 'Could not hear that clearly. Try again or type instead.');
+    };
+    rec.onend = () => setListening(false);
+    recRef.current = rec;
+    setListening(true);
+    try {
+      rec.start();
+    } catch {
+      setListening(false);
+    }
+  };
+
+  const speak = () => {
+    if (!canSpeak || !result) return;
     window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Accent & Language Matching
-    const langMap: Record<string, string> = {
-      'Hindi': 'hi-IN',
-      'English': 'en-IN',
-      'Marwari': 'hi-IN',
-      'Mewari': 'hi-IN'
-    };
-    
-    const targetLangCode = langMap[lang] || 'hi-IN';
-    utterance.lang = targetLangCode;
-
-    // Speech Parameters: Slightly faster and natural pitch
-    utterance.pitch = 1.0;
-    utterance.rate = 1.05;
-
-    utterance.onstart = () => {
-      setIsSpeaking(true);
-      setLoading(false); // Sync: Stop "Bridging Cultures" animation exactly when speech begins
-    };
-    
-    utterance.onend = () => {
-      setIsSpeaking(false);
-    };
-
-    utterance.onerror = () => {
-      setIsSpeaking(false);
-      setLoading(false);
-    };
-
-    // Find best matching voice for the accent
-    const speak = () => {
-      const voices = window.speechSynthesis.getVoices();
-      const voice = voices.find(v => v.lang === targetLangCode) || 
-                    voices.find(v => v.lang.startsWith(targetLangCode.split('-')[0]));
-      if (voice) utterance.voice = voice;
-      window.speechSynthesis.speak(utterance);
-    };
-
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = speak;
-    } else {
-      speak();
-    }
+    const u = new SpeechSynthesisUtterance(result);
+    u.lang = LANGUAGES.find(l => l.value === to)?.speech ?? 'hi-IN';
+    u.rate = 0.95;
+    const voice = window.speechSynthesis.getVoices().find(v => v.lang === u.lang) ?? window.speechSynthesis.getVoices().find(v => v.lang.startsWith(u.lang.slice(0, 2)));
+    if (voice) u.voice = voice;
+    u.onstart = () => setSpeaking(true);
+    u.onend = () => setSpeaking(false);
+    u.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(u);
   };
 
-  const startRecording = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("Hukumn, voice recognition is not supported in this browser.");
-      return;
+  const swap = () => {
+    setFrom(to);
+    setTo(from);
+    if (result) {
+      setText(result);
+      setResult('');
     }
-
-    recognitionRef.current = new SpeechRecognition();
-    
-    const langMap: Record<string, string> = {
-      'Hindi': 'hi-IN',
-      'English': 'en-US',
-      'Marwari': 'hi-IN',
-      'Mewari': 'hi-IN'
-    };
-
-    recognitionRef.current.lang = langMap[inputLang] || 'en-US';
-    
-    recognitionRef.current.onstart = () => setIsRecording(true);
-    recognitionRef.current.onresult = (event: any) => {
-      const text = event.results[0][0].transcript;
-      setTranscript(text);
-    };
-    recognitionRef.current.onend = () => setIsRecording(false);
-    recognitionRef.current.start();
   };
-
-  const PickerModal = ({ title, active, onSelect, onClose }: any) => (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
-      <div 
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" 
-        onClick={onClose}
-      />
-      <div className="glass-mewar p-8 rounded-[40px] border-2 border-gold/20 w-full max-w-md shadow-2xl bg-white relative animate-in zoom-in-95 duration-200">
-        <h3 className="text-xl font-heritage font-bold mb-6 text-center">{title}</h3>
-        <div className="grid grid-cols-2 gap-3">
-          {TRANSLATION_LANGS.map(lang => (
-            <button
-              key={lang}
-              onClick={() => { onSelect(lang); onClose(); }}
-              className={`py-4 rounded-2xl font-bold text-xs uppercase tracking-widest transition-all border-2 ${
-                active === lang 
-                ? 'bg-saffron border-saffron text-white shadow-lg' 
-                : 'bg-white border-gold/10 text-gray-600 hover:border-saffron hover:bg-saffron/5'
-              }`}
-            >
-              {lang}
-            </button>
-          ))}
-        </div>
-        <button onClick={onClose} className="w-full mt-6 py-3 text-[10px] font-bold text-gray-400 uppercase tracking-widest">Close</button>
-      </div>
-    </div>
-  );
 
   return (
-    <div className="font-outfit">
-      <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in duration-700 pb-24">
-      <div className="glass-mewar p-4 md:p-6 rounded-[32px] border-2 border-gold/10 shadow-lg flex flex-col md:flex-row items-center justify-between gap-6 bg-white/60">
-        <div className="flex items-center gap-6 w-full md:w-auto">
-          <div className="flex-1 md:flex-none">
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5 ml-1">My Language</p>
-            <button 
-              onClick={() => setShowInputPicker(true)}
-              className="w-full md:w-40 px-5 py-3 bg-white border border-gold/20 rounded-2xl font-bold text-xs flex items-center justify-between hover:border-saffron transition-all shadow-sm"
-            >
-              {inputLang}
-              <Settings2 size={14} className="text-gold" />
-            </button>
-          </div>
+    <PageContainer>
+      <PageHeader title="Translator" description="AI translation — double-check anything important." />
 
-          <button 
-            onClick={swapLanguages}
-            className="mt-5 p-3 bg-royal-gradient text-white rounded-full shadow-lg hover:rotate-180 transition-all active:scale-90"
-          >
-            <ArrowRightLeft size={18} />
-          </button>
+      <Card className="p-4 sm:p-5">
+        <div className="grid items-end gap-3 sm:grid-cols-[1fr_auto_1fr]">
+          <Field label="From">
+            <Select value={from} onChange={e => setFrom(e.target.value as Lang)}>
+              {LANGUAGES.map(l => <option key={l.value} value={l.value}>{l.value}</option>)}
+            </Select>
+          </Field>
+          <IconButton icon={ArrowLeftRight} label="Swap languages" onClick={swap} className="mx-auto border border-line bg-surface" />
+          <Field label="To">
+            <Select value={to} onChange={e => setTo(e.target.value as Lang)}>
+              {LANGUAGES.map(l => <option key={l.value} value={l.value}>{l.value}</option>)}
+            </Select>
+          </Field>
+        </div>
+      </Card>
 
-          <div className="flex-1 md:flex-none">
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1.5 ml-1">Target Language</p>
-            <button 
-              onClick={() => setShowTargetPicker(true)}
-              className="w-full md:w-40 px-5 py-3 bg-white border border-gold/20 rounded-2xl font-bold text-xs flex items-center justify-between hover:border-saffron transition-all shadow-sm"
-            >
-              {targetLang}
-              <Settings2 size={14} className="text-gold" />
-            </button>
+      <div className="mt-5 grid gap-5 lg:grid-cols-2">
+        <Card className="flex flex-col p-5">
+          <Field label={`${from} text`} hint={`${text.length} / 1000`}>
+            <Textarea rows={7} maxLength={1000} value={text} onChange={e => setText(e.target.value)} placeholder="Type or speak what you want to say" />
+          </Field>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button icon={Languages} onClick={() => void translate()} loading={loading} disabled={!text.trim()}>Translate</Button>
+            {canListen && (
+              <Button variant={listening ? 'danger' : 'secondary'} icon={listening ? Square : Mic} onClick={listen}>
+                {listening ? 'Stop' : `Speak ${from}`}
+              </Button>
+            )}
           </div>
-        </div>
-        
-        <div className="hidden lg:flex items-center gap-3 bg-saffron/5 px-4 py-2 rounded-2xl border border-saffron/10">
-          <Info size={14} className="text-saffron" />
-          <span className="text-[9px] font-bold text-saffron uppercase tracking-widest">AI Mediation Active: {inputLang} to {targetLang}</span>
-        </div>
-      </div>
-
-      <div className="glass-mewar p-10 rounded-[40px] border-2 border-gold/10 shadow-xl text-center relative overflow-hidden bg-white">
-        <div className="absolute top-0 right-0 p-10 opacity-[0.03] rotate-12 pointer-events-none">
-           <Languages size={200} />
-        </div>
-        
-        <div className="relative z-10 space-y-12">
-          <div className="space-y-2">
-            <h2 className="text-3xl font-heritage font-bold">The Royal Bridge</h2>
-            <p className="text-gray-500 italic text-sm">Speak naturally, our heritage AI handles the rest.</p>
-          </div>
-          
-          <div className="flex flex-col items-center gap-6">
-            <button
-              onClick={isRecording ? () => recognitionRef.current?.stop() : startRecording}
-              disabled={loading || isSpeaking}
-              className={`w-32 h-32 rounded-full flex items-center justify-center transition-all duration-500 shadow-2xl relative ${
-                isRecording ? 'bg-red-500 scale-110 shadow-red-200' : 'bg-royal-gradient hover:scale-105 active:scale-95'
-              } disabled:opacity-50`}
-            >
-              {isRecording ? (
-                <div className="flex gap-1.5 items-end">
-                  <div className="w-2 h-4 bg-white rounded-full animate-[bounce_0.8s_infinite_0ms]" />
-                  <div className="w-2 h-8 bg-white rounded-full animate-[bounce_0.8s_infinite_200ms]" />
-                  <div className="w-2 h-5 bg-white rounded-full animate-[bounce_0.8s_infinite_400ms]" />
-                </div>
-              ) : (
-                <Mic className="text-white w-14 h-14" />
-              )}
-              {isRecording && <div className="absolute -inset-4 rounded-full border-2 border-red-200 animate-ping opacity-30" />}
-            </button>
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.5em] animate-pulse">
-              {isRecording ? `Recording in ${inputLang}...` : `Tap to translate into ${targetLang}`}
+          {listening && (
+            <p className="mt-3 flex items-center gap-2 text-sm text-danger" role="status">
+              <span className="ms-wave flex h-5 items-center gap-1" aria-hidden><span /><span /><span /></span> Listening in {from}…
             </p>
+          )}
+        </Card>
+
+        <Card className={cx('relative flex min-h-64 flex-col p-5', result && 'ring-1 ring-gold/30')}>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-medium text-ink-soft">{to} translation</h2>
+            {result && canSpeak && (
+              <Button size="sm" variant="ghost" icon={Volume2} onClick={speak} aria-pressed={speaking}>{speaking ? 'Speaking…' : 'Listen'}</Button>
+            )}
           </div>
-        </div>
+          {loading && <div className="flex flex-1 items-center justify-center"><Spinner label="Translating" /></div>}
+          {!loading && error && <p role="alert" className="rounded-md border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">{error}</p>}
+          {!loading && !error && (
+            <p lang={to === 'English' ? 'en' : 'hi'} aria-live="polite" className={cx('flex-1 whitespace-pre-wrap font-display text-2xl leading-relaxed', !result && 'text-base font-sans text-ink-faint')}>
+              {result || 'The translation will appear here.'}
+            </p>
+          )}
+        </Card>
       </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 min-h-[350px]">
-        <div className="glass-mewar p-10 rounded-[40px] border-2 border-gold/10 shadow-lg flex flex-col bg-white/40 group hover:border-gold/30 transition-all">
-           <div className="flex items-center justify-between mb-8">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-gold/10 rounded-xl text-gold">
-                  <User size={18} />
-                </div>
-                <span className="text-[11px] font-bold uppercase tracking-widest text-gray-500">{inputLang} Input</span>
-              </div>
-           </div>
-           <div className="flex-grow flex items-center justify-center text-center italic text-gray-700 text-xl font-medium leading-relaxed">
-             {transcript || `Captured speech in ${inputLang} will appear here...`}
-           </div>
-        </div>
-
-        <div className="glass-mewar p-10 rounded-[40px] border-b-[16px] border-saffron shadow-xl flex flex-col relative overflow-hidden bg-white group hover:translate-y-[-4px] transition-all">
-           {loading && (
-             <div className="absolute inset-0 bg-white/95 backdrop-blur-md flex items-center justify-center z-10 animate-in fade-in">
-                <div className="flex flex-col items-center gap-6">
-                  <Loader2 className="animate-spin text-saffron w-16 h-16" />
-                  <p className="text-[11px] font-bold text-saffron uppercase tracking-[0.4em] animate-pulse">Bridging Cultures...</p>
-                </div>
-             </div>
-           )}
-           <div className="flex items-center justify-between mb-8">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-saffron/10 rounded-xl text-saffron">
-                  <Store size={18} />
-                </div>
-                <span className="text-[11px] font-bold uppercase tracking-widest text-saffron">{targetLang} Translation</span>
-              </div>
-              {translation && !loading && (
-                <button 
-                  onClick={() => speakTranslation(translation, targetLang)}
-                  className={`p-2 rounded-full hover:bg-saffron/10 transition-colors ${isSpeaking ? 'text-saffron animate-pulse' : 'text-gray-400'}`}
-                >
-                  <Volume2 size={20} />
-                </button>
-              )}
-           </div>
-           <div className="flex-grow flex items-center justify-center text-center font-heritage font-bold text-3xl text-gray-900 leading-snug animate-in slide-in-from-bottom-4">
-             {translation || `Translation in ${targetLang} will illuminate here...`}
-           </div>
-        </div>
-      </div>
-
-      {showInputPicker && (
-        <PickerModal 
-          title="Choose My Language" 
-          active={inputLang} 
-          onSelect={setInputLang} 
-          onClose={() => setShowInputPicker(false)} 
-        />
-      )}
-      
-      {showTargetPicker && (
-        <PickerModal 
-          title="Choose Target Language" 
-          active={targetLang} 
-          onSelect={setTargetLang} 
-          onClose={() => setShowTargetPicker(false)} 
-        />
-      )}
-
-      <div className="flex items-center justify-center gap-4 text-gray-400 text-[10px] font-bold uppercase tracking-[0.4em] pt-8 opacity-50">
-        <Languages size={14} />
-        Mewar-Sync Heritage Protocol v2.0
-      </div>
-      </div>
-    </div>
+    </PageContainer>
   );
 };

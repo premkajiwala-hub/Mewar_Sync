@@ -1,433 +1,338 @@
-
-import React, { useState, useCallback, useEffect } from 'react';
-import { User, Phone, Save, Loader2, Mail, Lock, ShieldCheck, Languages, MapPin, Camera, X as CloseIcon, Sparkles, FileText, ImageIcon } from 'lucide-react';
-import { UserProfile } from '../../types';
-import { ConfirmationModal } from '../UI/ConfirmationModal';
-import { storage } from '../../services/storage';
-import { LocationPicker } from '../UI/LocationPicker';
+import React, { useCallback, useEffect, useState } from 'react';
 import Cropper from 'react-easy-crop';
-import { GoogleGenAI } from "@google/genai";
+import { Camera, Image as ImageIcon, KeyRound, LogOut, MapPin, Save, Sparkles, UserRound } from 'lucide-react';
+import type { UserProfile } from '../../types';
+import { storage } from '../../services/storage';
+import { geminiService } from '../../services/gemini';
+import { errorMessage } from '../../services/api';
+import { LANGUAGE_OPTIONS } from '../../services/i18n';
+import { ImageValidationError, validateImageFile } from '../../lib/image';
+import { safeImageUrl } from '../../lib/text';
+import { useApp } from '../layout/AppContext';
+import { PageContainer } from '../layout/AppShell';
+import { Button } from '../ui/Button';
+import { Field, FormErrorSummary, Input, Select, Textarea } from '../ui/Form';
+import { Modal } from '../ui/Modal';
+import { Avatar, Badge, Card, CardHeader, PageHeader } from '../ui/Surface';
+import { useToast } from '../ui/Toast';
+import { LocationPicker } from '../ui/LocationPicker';
+import { CRAFT_CATEGORIES } from '../Auth/AuthPortal';
+import { SafeImage } from '../ui/SafeImage';
 
-export const ProfileSettings: React.FC<{ onModalToggle?: (isOpen: boolean) => void }> = ({ onModalToggle }) => {
-  const user = storage.getCurrentUser();
-  const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [modalConfig, setModalConfig] = useState<{ isOpen: boolean; title: string; message: string; type: 'alert' | 'confirm' }>({
-    isOpen: false,
-    title: '',
-    message: '',
-    type: 'alert'
-  });
-  const [formData, setFormData] = useState<Partial<UserProfile>>({
-    name: user?.name || '',
-    phone: user?.phone || '',
-    email: user?.email || '',
-    category: user?.category || 'Paintings',
-    preferredLanguage: user?.preferredLanguage || 'English',
-    location: user?.location,
-    profile_picture: user?.profile_picture || '',
-    thumbnail: user?.thumbnail || '',
-    description: user?.description || ''
-  });
+type CropTarget = 'profile_picture' | 'thumbnail';
+interface PixelArea { x: number; y: number; width: number; height: number }
 
-  // Cropping state
-  const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const [cropType, setCropType] = useState<'profile' | 'thumbnail'>('profile');
-  const [generatingAI, setGeneratingAI] = useState(false);
-  const [crop, setCrop] = useState({ x: 0, y: 0 });
+async function cropToBlob(src: string, area: PixelArea, maxSide: number): Promise<Blob> {
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new ImageValidationError('This photo could not be read.'));
+    i.src = src;
+  });
+  const scale = Math.min(1, maxSide / Math.max(area.width, area.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(area.width * scale);
+  canvas.height = Math.round(area.height * scale);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new ImageValidationError('Your browser could not process this photo.');
+  ctx.drawImage(img, area.x, area.y, area.width, area.height, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', 0.88));
+  if (!blob) throw new ImageValidationError('Your browser could not process this photo.');
+  return blob;
+}
+
+interface FormState {
+  name: string;
+  phone: string;
+  preferredLanguage: string;
+  category: string;
+  shopAddress: string;
+  description: string;
+  location?: { lat: number; lng: number };
+  profile_picture: string;
+  thumbnail: string;
+}
+
+function fromUser(u: UserProfile): FormState {
+  return {
+    name: u.name || '',
+    phone: u.phone || '',
+    preferredLanguage: u.preferredLanguage || 'English',
+    category: u.category || '',
+    shopAddress: u.shopAddress || '',
+    description: u.description || '',
+    location: u.location,
+    profile_picture: u.profile_picture || '',
+    thumbnail: u.thumbnail || '',
+  };
+}
+
+export const ProfileSettings: React.FC = () => {
+  const { user } = useApp();
+  const toast = useToast();
+  const isArtisan = user.role === 'SHOPKEEPER';
+  const [form, setForm] = useState<FormState>(() => fromUser(user));
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [crop, setCrop] = useState<{ target: CropTarget; src: string } | null>(null);
+  const [cropPos, setCropPos] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
-  const [croppedAreaPixels, setCroppedAreaPixels] = useState<any>(null);
+  const [area, setArea] = useState<PixelArea | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
 
+  // Keep the form in sync if the profile changes elsewhere, unless the user is editing.
+  const [dirty, setDirty] = useState(false);
   useEffect(() => {
-    onModalToggle?.(modalConfig.isOpen || !!imageSrc);
-  }, [modalConfig.isOpen, imageSrc, onModalToggle]);
+    if (!dirty) setForm(fromUser(user));
+  }, [user, dirty]);
 
-  const onCropComplete = useCallback((_croppedArea: any, croppedAreaPixels: any) => {
-    setCroppedAreaPixels(croppedAreaPixels);
-  }, []);
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'profile' | 'thumbnail') => {
-    if (e.target.files && e.target.files.length > 0) {
-      setCropType(type);
-      const file = e.target.files[0];
-      const reader = new FileReader();
-      reader.addEventListener('load', () => setImageSrc(reader.result as string));
-      reader.readAsDataURL(file);
-    }
+  const update = (patch: Partial<FormState>) => {
+    setDirty(true);
+    setForm(f => ({ ...f, ...patch }));
   };
 
-  const generateAIDescription = async () => {
-    if (!formData.name || !formData.category) {
-      alert("Hukumn, please provide your name and craft category first.");
+  const pickImage = (target: CropTarget, file?: File) => {
+    if (!file) return;
+    try {
+      validateImageFile(file);
+    } catch (err) {
+      toast.error('Cannot use this file', err instanceof Error ? err.message : undefined);
       return;
     }
-
-    setGeneratingAI(true);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Write a short, poetic, and professional profile description for an artisan named ${formData.name} who specializes in ${formData.category} in Udaipur, Rajasthan. The tone should be royal and heritage-focused. Keep it under 100 words.`,
-      });
-
-      if (response.text) {
-        setFormData({ ...formData, description: response.text.trim() });
-      }
-    } catch (err) {
-      console.error("AI Generation error:", err);
-      alert("Failed to generate description. Please try again.");
-    } finally {
-      setGeneratingAI(false);
-    }
+    setZoom(1);
+    setCropPos({ x: 0, y: 0 });
+    setCrop({ target, src: URL.createObjectURL(file) });
   };
 
-  const createImage = (url: string): Promise<HTMLImageElement> =>
-    new Promise((resolve, reject) => {
-      const image = new Image();
-      image.addEventListener('load', () => resolve(image));
-      image.addEventListener('error', (error) => reject(error));
-      image.setAttribute('crossOrigin', 'anonymous');
-      image.src = url;
-    });
-
-  const getCroppedImg = async (imageSrc: string, pixelCrop: any): Promise<Blob | null> => {
-    const image = await createImage(imageSrc);
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-
-    if (!ctx) return null;
-
-    canvas.width = pixelCrop.width;
-    canvas.height = pixelCrop.height;
-
-    ctx.drawImage(
-      image,
-      pixelCrop.x,
-      pixelCrop.y,
-      pixelCrop.width,
-      pixelCrop.height,
-      0,
-      0,
-      pixelCrop.width,
-      pixelCrop.height
-    );
-
-    return new Promise((resolve) => {
-      canvas.toBlob((blob) => {
-        resolve(blob);
-      }, 'image/jpeg');
-    });
+  const closeCrop = () => {
+    if (crop) URL.revokeObjectURL(crop.src);
+    setCrop(null);
   };
 
-  const handleCropSave = async () => {
-    if (!imageSrc || !croppedAreaPixels) return;
+  const onCropComplete = useCallback((_: unknown, pixels: PixelArea) => setArea(pixels), []);
+
+  const saveCrop = async () => {
+    if (!crop || !area) return;
     setUploading(true);
     try {
-      const croppedBlob = await getCroppedImg(imageSrc, croppedAreaPixels);
-      if (croppedBlob) {
-        const file = new File([croppedBlob], `${cropType}.jpg`, { type: 'image/jpeg' });
-        const url = await storage.uploadFile(file);
-        if (cropType === 'profile') {
-          setFormData({ ...formData, profile_picture: url });
-        } else {
-          setFormData({ ...formData, thumbnail: url });
-        }
-        setImageSrc(null);
-      }
+      const blob = await cropToBlob(crop.src, area, crop.target === 'profile_picture' ? 600 : 1600);
+      const url = await storage.uploadImage(blob);
+      update({ [crop.target]: url } as Partial<FormState>);
+      toast.info('Photo ready', 'Save your profile to keep it.');
+      closeCrop();
     } catch (err) {
-      console.error("Crop save error:", err);
-      alert("Failed to process image. Please try again.");
+      toast.error('Upload failed', errorMessage(err));
     } finally {
       setUploading(false);
     }
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!/^\d{10}$/.test(formData.phone || '')) {
-      setModalConfig({
-        isOpen: true,
-        title: "Invalid Phone",
-        message: "Hukumn, please enter a valid 10-digit phone number.",
-        type: 'alert'
-      });
+  const generateDescription = async () => {
+    if (form.name.trim().length < 2 || !form.category.trim()) {
+      setErrors(e => ({ ...e, description: 'Add your name and craft first.' }));
       return;
     }
-    
-    setLoading(true);
+    setGenerating(true);
     try {
-      await storage.updateProfile(formData);
-      setModalConfig({
-        isOpen: true,
-        title: "Registry Updated",
-        message: "Hukumn, your identity has been secured in the royal registry.",
-        type: 'alert'
-      });
-      // Force reload to apply language changes if needed
-      if (formData.preferredLanguage !== user?.preferredLanguage) {
-        window.location.reload();
-      }
+      const text = await geminiService.generateProfileDescription(form.name.trim(), form.category.trim());
+      update({ description: text });
+      toast.info('Draft added', 'Edit it to sound like you before saving.');
     } catch (err) {
-      setModalConfig({
-        isOpen: true,
-        title: "Update Failed",
-        message: "Failed to update registry. Please check your connection.",
-        type: 'alert'
-      });
+      toast.error('Could not write a description', errorMessage(err));
     } finally {
-      setLoading(false);
+      setGenerating(false);
     }
   };
 
+  const validate = (): Record<string, string> => {
+    const e: Record<string, string> = {};
+    if (form.name.trim().length < 2) e.name = 'Enter your full name.';
+    if (form.name.trim().length > 80) e.name = 'Keep your name under 80 characters.';
+    if (!/^\d{10}$/.test(form.phone.trim())) e.phone = 'Enter a 10-digit mobile number.';
+    if (isArtisan && form.category.trim().length > 60) e.category = 'Keep this under 60 characters.';
+    if (form.shopAddress.length > 200) e.shopAddress = 'Keep the address under 200 characters.';
+    if (form.description.length > 1500) e.description = 'Keep the description under 1,500 characters.';
+    return e;
+  };
+
+  const save = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    const e = validate();
+    setErrors(e);
+    if (Object.keys(e).length) return;
+    setSaving(true);
+    try {
+      await storage.updateProfile({
+        name: form.name.replace(/\s+/g, ' ').trim(),
+        phone: form.phone.trim(),
+        preferredLanguage: form.preferredLanguage,
+        profile_picture: form.profile_picture,
+        ...(isArtisan
+          ? {
+              category: form.category.trim(),
+              shopAddress: form.shopAddress.trim(),
+              description: form.description.trim(),
+              thumbnail: form.thumbnail,
+              location: form.location,
+            }
+          : {}),
+      });
+      setDirty(false);
+      toast.success('Profile saved');
+    } catch (err) {
+      toast.error('Could not save', errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const sendReset = async () => {
+    try {
+      await storage.requestPasswordReset(user.email);
+      setResetSent(true);
+    } catch (err) {
+      toast.error('Could not send the email', errorMessage(err));
+    }
+  };
+
+  const roleLabel = isArtisan ? 'Artisan' : user.role === 'ADMIN' ? 'Administrator' : 'Visitor';
+
   return (
-    <div className="font-outfit">
-      <div className="max-w-3xl mx-auto animate-in fade-in slide-in-from-bottom-8 duration-700">
-      <div className="glass-mewar p-10 rounded-[40px] border-2 border-gold/10 shadow-2xl overflow-hidden relative bg-white">
-        <div className="absolute -top-24 -right-24 w-64 h-64 bg-gold/5 rounded-full blur-3xl" />
-        
-        <div className="flex items-center gap-4 mb-10 relative z-10 font-heritage">
-           <div className="p-4 bg-royal-gradient rounded-3xl shadow-lg text-white">
-              <User size={32} />
-           </div>
-           <div>
-              <h2 className="text-3xl font-bold text-gray-900 uppercase tracking-tight">Identity Vault</h2>
-              <p className="text-xs text-gray-400 font-bold uppercase tracking-widest mt-1">Manage your official credentials</p>
-           </div>
-        </div>
+    <PageContainer>
+      <PageHeader title="Settings" />
 
-        <form onSubmit={handleSave} className="space-y-8 relative z-10">
-          {/* Profile Pictures Section */}
-          <div className={`grid grid-cols-1 ${user?.role === 'SHOPKEEPER' ? 'md:grid-cols-2' : ''} gap-8 pb-8 border-b border-gold/10`}>
-            <div className="flex flex-col items-center gap-4">
-              <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Profile Portrait</label>
-              <div className="relative group">
-                <div className="w-32 h-32 rounded-[40px] bg-royal-gradient flex items-center justify-center text-white text-4xl font-bold shadow-2xl overflow-hidden border-4 border-white">
-                  {formData.profile_picture ? (
-                    <img src={formData.profile_picture} className="w-full h-full object-cover" alt="Profile" />
-                  ) : (
-                    user?.name[0]
-                  )}
-                </div>
-                <label className="absolute -bottom-2 -right-2 p-3 bg-white text-gold rounded-2xl shadow-xl border border-gold/10 cursor-pointer hover:scale-110 transition-all">
-                  <Camera size={20} />
-                  <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileChange(e, 'profile')} />
-                </label>
-              </div>
+      <form onSubmit={save} noValidate className="space-y-6">
+        {Object.keys(errors).length > 1 && <FormErrorSummary errors={errors} />}
+
+        <Card>
+          <CardHeader title="Profile" icon={UserRound} />
+          <div className="grid gap-6 p-5 md:grid-cols-[auto_1fr]">
+            <div className="flex flex-col items-center gap-3">
+              <Avatar name={form.name} src={form.profile_picture} size={112} />
+              <label className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-md border border-line bg-surface px-3 text-sm font-semibold hover:border-gold has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-gold-deep">
+                <Camera aria-hidden className="size-4" /> Change photo
+                <input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={e => { pickImage('profile_picture', e.target.files?.[0]); e.target.value = ''; }} />
+              </label>
             </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Full name" required error={errors.name}>
+                <Input value={form.name} maxLength={80} autoComplete="name" onChange={e => update({ name: e.target.value })} />
+              </Field>
+              <Field label="Mobile number" required error={errors.phone} hint={isArtisan ? 'Visitors can see this on your pieces.' : undefined}>
+                <Input type="tel" inputMode="numeric" value={form.phone} onChange={e => update({ phone: e.target.value.replace(/[^\d]/g, '').slice(0, 10) })} />
+              </Field>
+              <Field label="Menu language" hint="Changes navigation labels.">
+                <Select value={form.preferredLanguage} onChange={e => update({ preferredLanguage: e.target.value })}>
+                  {LANGUAGE_OPTIONS.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
+                </Select>
+              </Field>
+              {isArtisan && (
+                <Field label="Main craft" error={errors.category}>
+                  <Input list="craft-list" value={form.category} maxLength={60} onChange={e => update({ category: e.target.value })} />
+                  <datalist id="craft-list">{CRAFT_CATEGORIES.map(c => <option key={c} value={c} />)}</datalist>
+                </Field>
+              )}
+            </div>
+          </div>
+        </Card>
 
-            {user?.role === 'SHOPKEEPER' && (
-              <div className="flex flex-col items-center gap-4">
-                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Gallery Thumbnail</label>
-                <div className="relative group">
-                  <div className="w-48 h-32 rounded-3xl bg-gray-100 flex items-center justify-center text-gold/20 shadow-xl overflow-hidden border-4 border-white">
-                    {formData.thumbnail ? (
-                      <img src={formData.thumbnail} className="w-full h-full object-cover" alt="Thumbnail" />
-                    ) : (
-                      <ImageIcon size={40} />
-                    )}
+        {isArtisan && (
+          <Card>
+            <CardHeader title="Workshop page" icon={ImageIcon} />
+            <div className="space-y-5 p-5">
+              <div className="grid gap-5 md:grid-cols-[240px_1fr]">
+                <div className="space-y-2">
+                  <p className="text-sm font-medium text-ink-soft">Cover image</p>
+                  <div className="aspect-[3/2] overflow-hidden rounded-md border border-line bg-parchment-soft">
+                    {form.thumbnail ? <SafeImage src={form.thumbnail} alt="Workshop cover" className="size-full" /> : <div className="flex size-full items-center justify-center text-ink-faint"><ImageIcon aria-hidden className="size-8" /></div>}
                   </div>
-                  <label className="absolute -bottom-2 -right-2 p-3 bg-white text-gold rounded-2xl shadow-xl border border-gold/10 cursor-pointer hover:scale-110 transition-all">
-                    <Camera size={20} />
-                    <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileChange(e, 'thumbnail')} />
+                  <label className="inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-md border border-line bg-surface px-3 text-sm font-semibold hover:border-gold has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-gold-deep">
+                    <Camera aria-hidden className="size-4" /> Change cover
+                    <input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={e => { pickImage('thumbnail', e.target.files?.[0]); e.target.value = ''; }} />
                   </label>
                 </div>
+                <div className="space-y-4">
+                  <Field label="Workshop address" error={errors.shopAddress}>
+                    <Input value={form.shopAddress} maxLength={200} onChange={e => update({ shopAddress: e.target.value })} placeholder="e.g. Near Hathi Pol, Udaipur" />
+                  </Field>
+                  <Field label="Your story" error={errors.description} hint={`${form.description.length.toLocaleString('en-IN')} / 1,500`}>
+                    <Textarea rows={5} value={form.description} maxLength={1500} onChange={e => update({ description: e.target.value })} placeholder="Tell visitors about your craft, your family tradition and your workshop." />
+                  </Field>
+                  <Button variant="ghost" size="sm" icon={Sparkles} loading={generating} onClick={generateDescription}>Draft with AI</Button>
+                </div>
               </div>
-            )}
+              <div className="border-t border-line-soft pt-5">
+                <p className="mb-3 flex items-center gap-1.5 text-sm font-semibold"><MapPin aria-hidden className="size-4 text-gold-deep" /> Workshop location</p>
+                <LocationPicker initialLocation={form.location} onLocationSelect={(lat, lng) => update({ location: { lat, lng } })} />
+              </div>
+            </div>
+          </Card>
+        )}
+
+        <div className="sticky bottom-4 z-10 flex justify-start pr-20 sm:justify-end sm:pr-24">
+          <Button type="submit" icon={Save} size="lg" loading={saving} disabled={!dirty} className="shadow-raised">
+            {dirty ? 'Save changes' : 'All changes saved'}
+          </Button>
+        </div>
+      </form>
+
+      <Card className="mt-6">
+        <CardHeader title="Account" icon={KeyRound} />
+        <dl className="divide-y divide-line-soft px-5">
+          <div className="flex flex-wrap items-center justify-between gap-2 py-3">
+            <dt className="text-sm text-ink-muted">Email</dt>
+            <dd className="text-sm font-medium">{user.email}</dd>
           </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-2">
-              <label className="text-[10px] font-heritage font-bold text-gray-400 uppercase tracking-widest ml-1">Full Name</label>
-              <div className="relative">
-                <User className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                <input 
-                  type="text" 
-                  value={formData.name}
-                  onChange={e => setFormData({...formData, name: e.target.value})}
-                  className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:border-saffron focus:outline-none" 
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-[10px] font-heritage font-bold text-gray-400 uppercase tracking-widest ml-1">Phone (10 Digits)</label>
-              <div className="relative">
-                <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                <input 
-                  type="tel" 
-                  value={formData.phone}
-                  onChange={e => setFormData({...formData, phone: e.target.value})}
-                  className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:border-saffron focus:outline-none" 
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-[10px] font-heritage font-bold text-gray-400 uppercase tracking-widest ml-1">Email Address</label>
-              <div className="relative opacity-60">
-                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                <input 
-                  disabled
-                  type="email" 
-                  value={formData.email}
-                  className="w-full bg-gray-100 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none cursor-not-allowed" 
-                />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-[10px] font-heritage font-bold text-gray-400 uppercase tracking-widest ml-1">Preferred Language</label>
-              <div className="relative">
-                <Languages className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                <select 
-                  value={formData.preferredLanguage}
-                  onChange={e => setFormData({...formData, preferredLanguage: e.target.value})}
-                  className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:border-saffron focus:outline-none appearance-none"
-                >
-                  <option value="English">English</option>
-                  <option value="Hindi">Hindi (हिंदी)</option>
-                  <option value="Marwadi">Marwadi (मारवाड़ी)</option>
-                </select>
-              </div>
-            </div>
-
-            {user?.role === 'SHOPKEEPER' && (
-              <div className="space-y-2">
-                <label className="text-[10px] font-heritage font-bold text-gray-400 uppercase tracking-widest ml-1">Craft Category</label>
-                <div className="relative">
-                  <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 text-gold w-4 h-4" />
-                  <input 
-                    type="text" 
-                    value={formData.category}
-                    onChange={e => setFormData({...formData, category: e.target.value})}
-                    className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:border-saffron focus:outline-none" 
-                  />
-                </div>
-              </div>
-            )}
-            
-            {user?.role === 'SHOPKEEPER' && (
-              <div className="md:col-span-2 space-y-2">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-heritage font-bold text-gray-400 uppercase tracking-widest ml-1">Heritage Story / Description</label>
-                  <button 
-                    type="button"
-                    onClick={generateAIDescription}
-                    disabled={generatingAI}
-                    className="flex items-center gap-2 text-[10px] font-bold text-gold uppercase tracking-widest hover:text-saffron transition-colors disabled:opacity-50"
-                  >
-                    {generatingAI ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                    Generate with AI
-                  </button>
-                </div>
-                <div className="relative">
-                  <FileText className="absolute left-4 top-4 text-gold w-4 h-4" />
-                  <textarea 
-                    value={formData.description}
-                    onChange={e => setFormData({...formData, description: e.target.value})}
-                    rows={4}
-                    placeholder="Tell your heritage story..."
-                    className="w-full bg-gray-50 border border-gold/10 rounded-2xl py-4 pl-12 pr-4 text-sm focus:border-saffron focus:outline-none resize-none" 
-                  />
-                </div>
-              </div>
-            )}
-            
-            {user?.role === 'SHOPKEEPER' && (
-              <div className="md:col-span-2 pt-6 border-t border-gold/10">
-                <div className="flex items-center gap-4 mb-6">
-                  <div className="p-3 bg-gold/10 rounded-2xl text-gold">
-                    <MapPin size={24} />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-heritage font-bold text-gray-900 uppercase tracking-tight text-left">Manage Workshop Location</h3>
-                    <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1 text-left">Update your map pin for visitors</p>
-                  </div>
-                </div>
-                <LocationPicker 
-                  initialLocation={formData.location}
-                  onLocationSelect={(lat, lng) => setFormData({...formData, location: { lat, lng }})}
-                />
-              </div>
-            )}
+          <div className="flex flex-wrap items-center justify-between gap-2 py-3">
+            <dt className="text-sm text-ink-muted">Account type</dt>
+            <dd><Badge tone="info">{roleLabel}</Badge></dd>
           </div>
-
-          <div className="pt-6 border-t border-gold/10 flex flex-col md:flex-row gap-4 items-center justify-between">
-             <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Account Type: {user?.role}</p>
-             <button 
-                type="submit" 
-                disabled={loading}
-                className="w-full md:w-auto px-12 py-3 bg-gray-900 text-white rounded-2xl font-bold flex items-center justify-center gap-3 shadow-xl hover:bg-black transition-all disabled:opacity-50 uppercase tracking-widest text-xs"
-              >
-                {loading ? <Loader2 className="animate-spin" /> : <Save size={18} />}
-                {loading ? 'Securing Registry...' : 'Seal Changes'}
-              </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+            <dt className="text-sm text-ink-muted">Password</dt>
+            <dd>{resetSent ? <span role="status" className="text-sm font-medium text-success">Reset link sent to your email.</span> : <Button variant="secondary" size="sm" onClick={sendReset}>Email me a reset link</Button>}</dd>
           </div>
-        </form>
-      </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+            <dt className="text-sm text-ink-muted">Session</dt>
+            <dd><Button variant="ghost" size="sm" icon={LogOut} className="text-danger hover:bg-danger-soft" onClick={() => storage.logout()}>Sign out</Button></dd>
+          </div>
+        </dl>
+      </Card>
 
-      {/* Cropper Modal */}
-      {imageSrc && (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
-          <div 
-            className="absolute inset-0 bg-black/90 backdrop-blur-xl animate-in fade-in duration-300" 
-            onClick={() => setImageSrc(null)}
-          />
-          <div className="bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-[40px] shadow-2xl flex flex-col relative animate-in zoom-in-95 duration-300">
-            <div className="p-6 border-b border-gold/10 flex justify-between items-center">
-              <h3 className="font-heritage font-bold text-xl text-gray-900">Adjust Your Portrait</h3>
-              <button onClick={() => setImageSrc(null)} className="text-gray-400 hover:text-red-500 transition-colors">
-                <CloseIcon size={24} />
-              </button>
-            </div>
-            <div className="relative h-[400px] bg-gray-900 flex-shrink-0">
+      <Modal
+        open={!!crop}
+        onClose={closeCrop}
+        dismissible={!uploading}
+        size="lg"
+        title={crop?.target === 'thumbnail' ? 'Frame your cover image' : 'Frame your photo'}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeCrop} disabled={uploading}>Cancel</Button>
+            <Button onClick={saveCrop} loading={uploading}>Use photo</Button>
+          </>
+        }
+      >
+        {crop && (
+          <div className="space-y-4">
+            <div className="relative h-[min(60dvh,380px)] overflow-hidden rounded-2xl bg-ink">
               <Cropper
-                image={imageSrc}
-                crop={crop}
+                image={crop.src}
+                crop={cropPos}
                 zoom={zoom}
-                aspect={cropType === 'profile' ? 1 : 3/2}
-                onCropChange={setCrop}
-                onCropComplete={onCropComplete}
+                aspect={crop.target === 'profile_picture' ? 1 : 3 / 2}
+                cropShape={crop.target === 'profile_picture' ? 'round' : 'rect'}
+                onCropChange={setCropPos}
                 onZoomChange={setZoom}
+                onCropComplete={onCropComplete}
               />
             </div>
-            <div className="p-8 space-y-6">
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Zoom</label>
-                <input
-                  type="range"
-                  value={zoom}
-                  min={1}
-                  max={3}
-                  step={0.1}
-                  aria-labelledby="Zoom"
-                  onChange={(e) => setZoom(Number(e.target.value))}
-                  className="w-full h-2 bg-gray-100 rounded-lg appearance-none cursor-pointer accent-gold"
-                />
-              </div>
-              <button 
-                onClick={handleCropSave}
-                disabled={uploading}
-                className="w-full py-3 bg-royal-gradient text-white rounded-2xl font-bold text-xs uppercase tracking-widest shadow-xl disabled:opacity-50 flex items-center justify-center gap-3"
-              >
-                {uploading ? <Loader2 className="animate-spin" /> : <Save size={18} />}
-                {uploading ? 'Processing...' : 'Confirm Portrait'}
-              </button>
-            </div>
+            <Field label="Zoom">
+              <input type="range" min={1} max={3} step={0.05} value={zoom} onChange={e => setZoom(Number(e.target.value))} className="w-full accent-indigo" />
+            </Field>
           </div>
-        </div>
-      )}
-
-      <ConfirmationModal
-        isOpen={modalConfig.isOpen}
-        title={modalConfig.title}
-        message={modalConfig.message}
-        type={modalConfig.type}
-        confirmLabel="Dhanyawad"
-        onConfirm={() => setModalConfig({ ...modalConfig, isOpen: false })}
-        onCancel={() => setModalConfig({ ...modalConfig, isOpen: false })}
-      />
-      </div>
-    </div>
+        )}
+      </Modal>
+    </PageContainer>
   );
 };
